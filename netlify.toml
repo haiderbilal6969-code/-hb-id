@@ -16,3 +16,10 @@
   to = "/.netlify/functions/oidc/:splat"
   status = 200
   force = false
+
+# These labels are shown on Netlify's official Deploy-to-Netlify form.
+# No credentials are committed to GitHub.
+[template.environment]
+  DATABASE_URL = "Paste the private PostgreSQL URI for your Neon hb-id-dev database"
+  BOOTSTRAP_ADMIN_EMAIL = "Your administrator email address"
+  BOOTSTRAP_ADMIN_PASSWORD = "Create a NEW unique 16+ character administrator password"

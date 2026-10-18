@@ -6,7 +6,7 @@ import { initDatabase, getOrMakeKeys, PostgresOidcAdapter, findByEmail, findById
   deleteDashboardSession, query } from './db.mjs';
 import { home, portal, portalLogin, interactionLogin, interactionConsent, errorPage } from './ui.mjs';
 
-const ISSUER=(process.env.ISSUER||'').trim().replace(/\/$/,'');
+const ISSUER=(process.env.ISSUER||process.env.URL||'').trim().replace(/\/$/,'');
 if (!ISSUER) throw new Error('Set ISSUER to your exact public HTTPS URL');
 const issuerUrl=new URL(ISSUER);
 if (issuerUrl.pathname !== '/' || issuerUrl.search || issuerUrl.hash || (issuerUrl.protocol!=='https:' && !(issuerUrl.protocol==='http:' && ['localhost','127.0.0.1'].includes(issuerUrl.hostname)))) {

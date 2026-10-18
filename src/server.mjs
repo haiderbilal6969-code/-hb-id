@@ -168,7 +168,7 @@ app.use((err,req,res,next)=>{
 });
 // Netlify Functions import this Express app without opening a listening socket.
 // Traditional Node.js hosting (Render/VPS) still uses `npm start`.
-if (process.env.NETLIFY !== 'true') {
+if (process.env.HB_ID_SERVERLESS !== 'true' && process.env.NETLIFY !== 'true') {
   app.listen(PORT,'0.0.0.0',()=>console.log(`HB ID provider listening on port ${PORT} with issuer ${ISSUER}`));
 }
 export default app;

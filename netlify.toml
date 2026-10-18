@@ -1,0 +1,18 @@
+# Netlify Free hosting for a small-scale HB ID test deployment.
+# This file contains NO credentials. Supply secrets under Netlify site settings.
+[build]
+  publish = "public"
+  command = "npm run check"
+
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"
+  external_node_modules = ["oidc-provider", "pg"]
+
+# Send every dynamic route, including OpenID discovery, through our Express app.
+# Static files such as /style.css are served from public/ first.
+[[redirects]]
+  from = "/*"
+  to = "/.netlify/functions/oidc/:splat"
+  status = 200
+  force = false

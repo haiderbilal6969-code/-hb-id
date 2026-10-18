@@ -1,3 +1,15 @@
+## Deploy HB ID without a payment card (development only)
+
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/haiderbilal6969-code/-hb-id)
+
+The template asks for a Neon `DATABASE_URL`, `BOOTSTRAP_ADMIN_EMAIL`, and
+`BOOTSTRAP_ADMIN_PASSWORD` **inside Netlify**, never in GitHub. Netlify's
+built-in `URL` variable supplies the OIDC issuer automatically unless you
+explicitly set `ISSUER`. The live URL must not be renamed after connecting clients.
+
+See [NETLIFY_DEPLOYMENT.md](NETLIFY_DEPLOYMENT.md) for details. This app has
+**not** been security-audited for public production authentication.
+
 # HB ID — Your Own OpenID Connect Login Provider
 
 HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for connecting websites under your own name. It does **not** rely on a ChatGPT identity or brand.

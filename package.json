@@ -3,7 +3,18 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.0.0" },
-  "scripts": { "start": "node src/server.mjs", "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs" },
-  "dependencies": { "express": "^5.1.0", "oidc-provider": "^9.0.0", "pg": "^8.16.0", "helmet": "^8.1.0" }
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs && node --check netlify/functions/oidc.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "oidc-provider": "^9.0.0",
+    "pg": "^8.16.0",
+    "helmet": "^8.1.0",
+    "serverless-http": "^4.0.0"
+  }
 }

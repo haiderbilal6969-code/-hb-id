@@ -166,4 +166,9 @@ app.use((err,req,res,next)=>{
   if(res.headersSent)return next(err);
   return html(res,errorPage('Request failed','Please retry. If the problem continues, contact the HB ID administrator.',500),500);
 });
-app.listen(PORT,'0.0.0.0',()=>console.log(`HB ID provider listening on port ${PORT} with issuer ${ISSUER}`));
+// Netlify Functions import this Express app without opening a listening socket.
+// Traditional Node.js hosting (Render/VPS) still uses `npm start`.
+if (process.env.NETLIFY !== 'true') {
+  app.listen(PORT,'0.0.0.0',()=>console.log(`HB ID provider listening on port ${PORT} with issuer ${ISSUER}`));
+}
+export default app;

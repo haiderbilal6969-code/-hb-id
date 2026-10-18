@@ -106,3 +106,8 @@ Static files for Pages are in `docs/`; see [GITHUB_DEPLOYMENT.md](GITHUB_DEPLOYM
 - Enable GitHub Pages at https://github.com/haiderbilal6969-code/-hb-id/settings/pages using **Deploy from a branch → main → /docs**.
 - Public Pages URL after successfully enabled: https://haiderbilal6969-code.github.io/-hb-id/
 - **Important:** GitHub Pages only hosts the static homepage. The real OpenID Connect server requires separately hosted Node.js and PostgreSQL. Do not add credentials to docs/settings.js.
+
+## No-card test hosting (Netlify + Neon)
+
+For the Netlify Free setup guide, see [NETLIFY_DEPLOYMENT.md](NETLIFY_DEPLOYMENT.md).
+This setup uses Netlify Functions for the OIDC backend and the existing Neon PostgreSQL database. It is for test accounts only; the service needs a security review, MFA, verified email, and operational controls before serving real users.

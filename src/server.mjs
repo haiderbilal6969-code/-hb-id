@@ -40,6 +40,7 @@ app.set('trust proxy',1);
 // Helmet's no-referrer default turns ordinary form POST origins into "null".
 // Preserve the origin for HB ID forms while withholding referrers from other sites.
 app.use(helmet({referrerPolicy:{policy:'same-origin'},contentSecurityPolicy:{directives:{'style-src':["'self'","'unsafe-inline'"],'upgrade-insecure-requests':null}}}));
+app.use(['/portal','/interaction'],(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
 app.use('/portal',express.urlencoded({extended:false,limit:'16kb'}));
 app.use('/interaction',express.urlencoded({extended:false,limit:'16kb'}));
 app.use(express.static(new URL('../public/',import.meta.url).pathname,{fallthrough:true,maxAge:'1h'}));
@@ -48,7 +49,14 @@ function html(res,contents,status=200){res.status(status).type('html').send(cont
 function cookies(req){return Object.fromEntries((req.headers.cookie||'').split(';').map(x=>x.trim().split(/=(.*)/s).slice(0,2)).filter(x=>x[0]).map(([k,v])=>[k,decodeURIComponent(v||'')]));}
 function originGuard(req,res,next){
   const origin=req.get('origin');
-  if(origin!==issuerUrl.origin){return html(res,errorPage('Request blocked','This form must be submitted from the HB ID website.',403),403);}
+  // Older browsers can omit Origin. Accept only an exact trusted Referer
+  // in that case; never override an explicitly foreign Origin.
+  let trusted=origin===issuerUrl.origin;
+  if(!origin||origin==='null'){
+    try{trusted=new URL(req.get('referer')).origin===issuerUrl.origin;}catch{trusted=false;}
+  }
+  if(req.get('sec-fetch-site')==='cross-site')trusted=false;
+  if(!trusted){return html(res,errorPage('Request blocked','Please reopen the sign-in page from the HB ID website and try again.',403),403);}
   next();
 }
 const limiter=new Map();

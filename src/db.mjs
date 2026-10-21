@@ -1,10 +1,16 @@
 import pg from 'pg';
+import { attachDatabasePool } from '@vercel/functions';
 import { randomBytes, randomUUID, generateKeyPairSync, scrypt as scryptCb, timingSafeEqual, createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 const scrypt = promisify(scryptCb);
-if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL environment variable is required');
-export const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 5, idleTimeoutMillis: 30000 });
-export const query = (sql, args=[]) => pool.query(sql, args);
+export const pool = process.env.DATABASE_URL
+  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 5, idleTimeoutMillis: 30000 })
+  : null;
+if (pool && process.env.VERCEL) attachDatabasePool(pool);
+export const query = (sql, args=[]) => {
+  if (!pool) throw new Error('DATABASE_URL environment variable is required');
+  return pool.query(sql, args);
+};
 export const rand = (bytes=32) => randomBytes(bytes).toString('base64url');
 export const digest = (value) => createHash('sha256').update(value).digest('hex');
 export const escapeHtml = (input='') => String(input ?? '').replace(/[&<>"']/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -22,41 +28,56 @@ export async function verifyPassword(password, stored) {
   return timingSafeEqual(expected,actual);
 }
 export async function initDatabase() {
-  await query(`CREATE TABLE IF NOT EXISTS users (
-    id UUID PRIMARY KEY, name VARCHAR(150) NOT NULL, email VARCHAR(320) NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL, is_admin BOOLEAN NOT NULL DEFAULT FALSE,
-    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`);
-  await query(`CREATE TABLE IF NOT EXISTS oidc_objects (
-    model TEXT NOT NULL, id TEXT NOT NULL, payload JSONB NOT NULL,
-    expires_at TIMESTAMPTZ, grant_id TEXT, uid TEXT, user_code TEXT,
-    PRIMARY KEY(model,id)
-  )`);
-  await query('CREATE INDEX IF NOT EXISTS oidc_objects_grant_idx ON oidc_objects (grant_id)');
-  await query('CREATE INDEX IF NOT EXISTS oidc_objects_uid_idx ON oidc_objects (uid)');
-  await query('CREATE INDEX IF NOT EXISTS oidc_objects_code_idx ON oidc_objects (user_code)');
-  await query(`CREATE TABLE IF NOT EXISTS dashboard_sessions (
-    token_hash CHAR(64) PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    csrf TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL
-  )`);
-  await query(`CREATE TABLE IF NOT EXISTS system_config (
-    name TEXT PRIMARY KEY, value JSONB NOT NULL
-  )`);
-  await query('DELETE FROM dashboard_sessions WHERE expires_at < NOW()');
-  const email=process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
-  const password=process.env.BOOTSTRAP_ADMIN_PASSWORD;
-  if (email && password) {
-    if (password.length < 14) throw new Error('BOOTSTRAP_ADMIN_PASSWORD needs at least 14 characters');
-    const n=await query('SELECT COUNT(*)::int AS n FROM users WHERE is_admin=true');
-    if(n.rows[0].n===0){
-      await query('INSERT INTO users (id,name,email,password_hash,is_admin,email_verified) VALUES ($1,$2,$3,$4,true,false) ON CONFLICT(email) DO NOTHING',
-        [randomUUID(), 'HB ID Owner', email, await hashPassword(password)]);
-      console.log('Initial administrator seeded. Remove BOOTSTRAP_ADMIN_PASSWORD from host variables after seeding.');
+  if (!pool) throw new Error('DATABASE_URL environment variable is required');
+  // Serialize first-start migrations and owner creation across cold starts.
+  const client = await pool.connect();
+  const query = (sql, args=[]) => client.query(sql, args);
+  try {
+    await query('BEGIN');
+    await query("SELECT pg_advisory_xact_lock(hashtext('hb-id:initialize'))");
+    await query(`CREATE TABLE IF NOT EXISTS users (
+      id UUID PRIMARY KEY, name VARCHAR(150) NOT NULL, email VARCHAR(320) NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL, is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+      email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
+    await query(`CREATE TABLE IF NOT EXISTS oidc_objects (
+      model TEXT NOT NULL, id TEXT NOT NULL, payload JSONB NOT NULL,
+      expires_at TIMESTAMPTZ, grant_id TEXT, uid TEXT, user_code TEXT,
+      PRIMARY KEY(model,id)
+    )`);
+    await query('CREATE INDEX IF NOT EXISTS oidc_objects_grant_idx ON oidc_objects (grant_id)');
+    await query('CREATE INDEX IF NOT EXISTS oidc_objects_uid_idx ON oidc_objects (uid)');
+    await query('CREATE INDEX IF NOT EXISTS oidc_objects_code_idx ON oidc_objects (user_code)');
+    await query(`CREATE TABLE IF NOT EXISTS dashboard_sessions (
+      token_hash CHAR(64) PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      csrf TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL
+    )`);
+    await query(`CREATE TABLE IF NOT EXISTS system_config (
+      name TEXT PRIMARY KEY, value JSONB NOT NULL
+    )`);
+    await query('DELETE FROM dashboard_sessions WHERE expires_at < NOW()');
+    const email=process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
+    const password=process.env.BOOTSTRAP_ADMIN_PASSWORD;
+    if (email && password) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 320) throw new Error('BOOTSTRAP_ADMIN_EMAIL must be a valid email address');
+      if (password.length < 14 || password.length > 200) throw new Error('BOOTSTRAP_ADMIN_PASSWORD needs 14–200 characters');
+      const n=await query('SELECT COUNT(*)::int AS n FROM users WHERE is_admin=true');
+      if(n.rows[0].n===0){
+        await query('INSERT INTO users (id,name,email,password_hash,is_admin,email_verified) VALUES ($1,$2,$3,$4,true,false) ON CONFLICT(email) DO NOTHING',
+          [randomUUID(), 'HB ID Owner', email, await hashPassword(password)]);
+        console.log('Initial administrator seeded. Remove BOOTSTRAP_ADMIN_PASSWORD from host variables after seeding.');
+      }
     }
+    const admin=await query('SELECT COUNT(*)::int AS n FROM users WHERE is_admin=true');
+    await query('COMMIT');
+    return admin.rows[0].n > 0;
+  } catch (error) {
+    await query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  const admin=await query('SELECT COUNT(*)::int AS n FROM users WHERE is_admin=true');
-  if(admin.rows[0].n===0) throw new Error('Set BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD for the first start');
 }
 export async function getOrMakeKeys() {
   const existing=await query('SELECT value FROM system_config WHERE name=$1',['identity_keys']);

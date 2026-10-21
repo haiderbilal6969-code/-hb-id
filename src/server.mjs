@@ -4,7 +4,7 @@ import { Provider } from 'oidc-provider';
 import { initDatabase, getOrMakeKeys, PostgresOidcAdapter, findByEmail, findById, verifyPassword,
   createClient, listClients, listUsers, createUser, createDashboardSession, getDashboardSession,
   deleteDashboardSession, query } from './db.mjs';
-import { home, portal, portalLogin, interactionLogin, interactionConsent, errorPage } from './ui.mjs';
+import { home, portal, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending } from './ui.mjs';
 
 const ISSUER=(process.env.ISSUER||process.env.URL||'').trim().replace(/\/$/,'');
 if (!ISSUER) throw new Error('Set ISSUER to your exact public HTTPS URL');
@@ -13,9 +13,10 @@ if (issuerUrl.pathname !== '/' || issuerUrl.search || issuerUrl.hash || (issuerU
   throw new Error('ISSUER must be a root-level HTTPS URL, except for localhost development');
 }
 const PORT=Number(process.env.PORT||3000);
-await initDatabase();
-const identityKeys=await getOrMakeKeys();
-const provider=new Provider(ISSUER,{
+const databaseConfigured = Boolean(process.env.DATABASE_URL);
+const ownerReady = databaseConfigured ? await initDatabase() : false;
+const identityKeys = databaseConfigured ? await getOrMakeKeys() : null;
+const provider=identityKeys ? new Provider(ISSUER,{
   clients: [],
   adapter: PostgresOidcAdapter,
   jwks: {keys: identityKeys.signingKeys},
@@ -30,8 +31,8 @@ const provider=new Provider(ISSUER,{
       // Never expose an unverified email as a verified identity claim.
       ...(account.email_verified?{email:account.email,email_verified:true}:{email_verified:false})};}};
   }
-});
-provider.proxy=true;
+}) : null;
+if(provider)provider.proxy=true;
 const app=express();
 app.disable('x-powered-by');
 app.set('trust proxy',1);
@@ -81,8 +82,16 @@ async function renderPortal(req,res,{message='',error='',created=null}={}){
   res.set('Cache-Control','no-store');
   html(res,portal({session:req.portalSession,apps,users,created,issuer:ISSUER,message,error}));
 }
-app.get('/healthz', (_req,res)=>res.status(200).json({ok:true}));
+app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady}));
+app.get('/readyz', (_req,res)=>res.status(ownerReady?200:503).json({ready:ownerReady}));
 app.get('/', (_req,res)=>html(res,home()));
+// Only the hosting account owner can seed an administrator through private env vars.
+// There is deliberately no public first-user enrollment route.
+app.use((_req,res,next)=>{
+  if(ownerReady)return next();
+  res.set('Cache-Control','no-store');
+  return html(res,setupPending(),503);
+});
 app.get('/portal/login', async(req,res)=>{
   if(await getDashboardSession(cookies(req).hb_portal))return res.redirect('/portal');
   html(res,portalLogin());
@@ -160,15 +169,14 @@ app.post('/interaction/:uid/abort',originGuard,async(req,res)=>{
   if(details.uid!==req.params.uid)return html(res,errorPage('Invalid sign-in','Restart the sign-in from your website.',400),400);
   await provider.interactionFinished(req,res,{error:'access_denied',error_description:'The user cancelled sign-in.'},{mergeWithLastSubmission:false});
 });
-app.use(provider.callback());
+if(provider)app.use(provider.callback());
 app.use((err,req,res,next)=>{
   console.error('HB ID request error:',err?.message||'Unknown error');
   if(res.headersSent)return next(err);
   return html(res,errorPage('Request failed','Please retry. If the problem continues, contact the HB ID administrator.',500),500);
 });
-// Netlify Functions import this Express app without opening a listening socket.
-// Traditional Node.js hosting (Render/VPS) still uses `npm start`.
-if (process.env.HB_ID_SERVERLESS !== 'true' && process.env.NETLIFY !== 'true') {
+// Serverless hosts import the app; traditional Node.js hosts use npm start.
+if (process.env.HB_ID_SERVERLESS !== 'true' && process.env.NETLIFY !== 'true' && !process.env.VERCEL) {
   app.listen(PORT,'0.0.0.0',()=>console.log(`HB ID provider listening on port ${PORT} with issuer ${ISSUER}`));
 }
 export default app;

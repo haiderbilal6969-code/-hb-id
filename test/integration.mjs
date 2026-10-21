@@ -94,6 +94,32 @@ try {
   assert.ok(client.client_secret,'Confidential client registered');
   console.log('PASS: owner bootstrap is idempotent; origin checks, CSRF and client registration');
 
+  const walletEntry=await request('/wallet/login');
+  assert.equal(walletEntry.status,303);
+  assert.equal(walletEntry.headers.get('location'),'/portal');
+  const copiedEntry=await request('/wallet/login?token=not-a-login-credential',{browser:false});
+  assert.equal(copiedEntry.headers.get('location'),'/portal/login');
+  const wallet=await request('/portal/wallet');
+  assert.equal(wallet.status,200);
+  assert.ok(wallet.text.includes('finish setup'));
+  assert.equal((await request('/portal/wallet/create',{method:'POST',form:{}})).status,403);
+  const unconfigured=await request('/portal/wallet/create',{method:'POST',form:{_csrf:csrf}});
+  assert.equal(unconfigured.headers.get('location'),'/portal/wallet?result=unavailable');
+  const owner=await db.findByEmail('owner@example.invalid');
+  assert.equal(await db.getWalletPass(owner.id),null);
+  assert.equal(await db.claimWalletPass(owner.id),true);
+  assert.equal(await db.claimWalletPass(owner.id),false);
+  await db.completeWalletPass(owner.id,{serialNumber:'test-pass',googleSaveUrl:'https://pay.google.com/gp/v/save/test-owner-only',shareUrl:null});
+  assert.equal(await db.claimWalletPass(owner.id),false);
+  assert.ok((await request('/portal/wallet')).text.includes('Add to Google Wallet'));
+  const member=await db.createUser('Another member','member@example.invalid',randomBytes(32).toString('base64url'));
+  assert.equal(await db.getWalletPass(member.id),null);
+  assert.equal(await db.claimWalletPass(member.id),true);
+  await db.failWalletPass(member.id,'creation_uncertain',true);
+  assert.equal(await db.claimWalletPass(member.id),false);
+  assert.equal((await db.getWalletPass(member.id)).google_save_url,null);
+  console.log('PASS: Wallet shortcut requires a session; pass creation needs CSRF; saved and uncertain requests cannot issue duplicates');
+
   const verifier=randomBytes(32).toString('base64url');
   const state=randomBytes(16).toString('base64url');
   const nonce=randomBytes(16).toString('base64url');

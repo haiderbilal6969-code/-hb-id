@@ -13,6 +13,7 @@ HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for 
 - Admin creates OIDC client IDs, secrets and approved redirect URLs.
 - Standards-based Authorization Code Flow / OIDC Discovery / JWKS / Token / UserInfo via the widely used `oidc-provider` library.
 - Explicit consent screen for client permissions.
+- Google Wallet login-pass creation and private save links, once the optional provider API key is configured. The card opens HB ID and reuses an existing browser session; it never substitutes for authentication. See [WALLET_SETUP.md](WALLET_SETUP.md).
 - Database-backed OIDC sessions, grants, authorization codes and other transient models; database-persisted issuer signing key and signing-cookie keys so app restarts preserve identity keys.
 - Sample website demonstrates “Continue with HB ID” using Authorization Code + PKCE, state and nonce.
 

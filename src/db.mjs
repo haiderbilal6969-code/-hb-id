@@ -56,6 +56,12 @@ export async function initDatabase() {
     await query(`CREATE TABLE IF NOT EXISTS system_config (
       name TEXT PRIMARY KEY, value JSONB NOT NULL
     )`);
+    await query(`CREATE TABLE IF NOT EXISTS wallet_passes (
+      user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('pending','ready','failed','unknown')),
+      serial_number TEXT, google_save_url TEXT, share_url TEXT, error_code TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`);
     await query('DELETE FROM dashboard_sessions WHERE expires_at < NOW()');
     const email=process.env.BOOTSTRAP_ADMIN_EMAIL?.trim().toLowerCase();
     const password=process.env.BOOTSTRAP_ADMIN_PASSWORD;
@@ -119,6 +125,24 @@ export async function getDashboardSession(token){
   return r.rows[0]||null;
 }
 export async function deleteDashboardSession(token){ if(token) await query('DELETE FROM dashboard_sessions WHERE token_hash=$1',[digest(token)]); }
+export async function getWalletPass(userId){
+  const r=await query('SELECT status,google_save_url FROM wallet_passes WHERE user_id=$1',[userId]);
+  return r.rows[0]||null;
+}
+export async function claimWalletPass(userId){
+  const r=await query(`INSERT INTO wallet_passes(user_id,status) VALUES($1,'pending')
+    ON CONFLICT(user_id) DO UPDATE SET status='pending',error_code=NULL,updated_at=NOW()
+    WHERE wallet_passes.status='failed' RETURNING user_id`,[userId]);
+  return r.rowCount===1;
+}
+export async function completeWalletPass(userId,pass){
+  await query(`UPDATE wallet_passes SET status='ready',serial_number=$2,google_save_url=$3,
+    share_url=$4,error_code=NULL,updated_at=NOW() WHERE user_id=$1 AND status='pending'`,
+    [userId,pass.serialNumber,pass.googleSaveUrl,pass.shareUrl]);
+}
+export async function failWalletPass(userId,code,uncertain){
+  await query("UPDATE wallet_passes SET status=$2,error_code=$3,updated_at=NOW() WHERE user_id=$1 AND status='pending'",[userId,uncertain?'unknown':'failed',code]);
+}
 export async function createClient(name,redirectUri){
   const clientId='hb_'+rand(16);
   const secret=rand(40);

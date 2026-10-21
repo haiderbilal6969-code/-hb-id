@@ -3,8 +3,9 @@ import helmet from 'helmet';
 import { Provider } from 'oidc-provider';
 import { initDatabase, getOrMakeKeys, PostgresOidcAdapter, findByEmail, findById, verifyPassword,
   createClient, listClients, listUsers, createUser, createDashboardSession, getDashboardSession,
-  deleteDashboardSession, query } from './db.mjs';
-import { home, portal, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending } from './ui.mjs';
+  deleteDashboardSession, getWalletPass, claimWalletPass, completeWalletPass, failWalletPass } from './db.mjs';
+import { home, portal, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending, walletPage } from './ui.mjs';
+import { createWalletPass, WalletServiceError } from './wallet.mjs';
 
 const ISSUER=(process.env.ISSUER||process.env.URL||'').trim().replace(/\/$/,'');
 if (!ISSUER) throw new Error('Set ISSUER to your exact public HTTPS URL');
@@ -105,6 +106,33 @@ app.post('/portal/login',originGuard,rateLimit,async(req,res)=>{
   res.redirect(303,'/portal');
 });
 app.get('/portal',requirePortal,async(req,res)=>renderPortal(req,res));
+app.get('/wallet/login',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  // The QR has no account identifier or login token. Only the browser session counts.
+  const session=await getDashboardSession(cookies(req).hb_portal);
+  res.redirect(303,session?'/portal':'/portal/login');
+});
+app.get('/portal/wallet',requirePortal,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  html(res,walletPage({session:req.portalSession,pass:await getWalletPass(req.portalSession.id),
+    configured:Boolean(process.env.WALLETWALLET_API_KEY),message:req.query.result==='unavailable'?'Pass creation is unavailable right now. Please contact the platform owner.':''}));
+});
+app.post('/portal/wallet/create',originGuard,requirePortal,csrfGuard,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  if(!process.env.WALLETWALLET_API_KEY)return res.redirect(303,'/portal/wallet?result=unavailable');
+  const user=req.portalSession;
+  if(!await claimWalletPass(user.id))return res.redirect(303,'/portal/wallet');
+  let issued;
+  try {issued=await createWalletPass(user,{issuer:ISSUER});}
+  catch(error){
+    const known=error instanceof WalletServiceError;
+    await failWalletPass(user.id,known?error.code:'creation_uncertain',known?error.uncertain:true);
+    return res.redirect(303,'/portal/wallet?result=unavailable');
+  }
+  // A failed database save leaves the row pending, preventing duplicate issuance.
+  await completeWalletPass(user.id,issued);
+  return res.redirect(303,'/portal/wallet');
+});
 app.post('/portal/logout',originGuard,requirePortal,csrfGuard,async(req,res)=>{
   await deleteDashboardSession(cookies(req).hb_portal);clearPortalCookie(res);res.redirect(303,'/');
 });

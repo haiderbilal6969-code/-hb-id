@@ -80,9 +80,20 @@ try {
   const discovery = JSON.parse((await request('/.well-known/openid-configuration')).text);
   assert.equal(discovery.issuer,issuer);
   const keysBefore = JSON.parse((await request(discovery.jwks_uri)).text);
+  const loginPage = await request('/portal/login');
+  assert.equal(loginPage.status,200);
+  // no-referrer makes browsers send Origin: null on normal HTML form posts.
+  // Keep the origin available inside HB ID without sending referrers elsewhere.
+  assert.equal(loginPage.headers.get('referrer-policy'),'same-origin','Browser form submissions must preserve the HB ID origin');
   assert.equal((await request('/portal/login',{method:'POST',form:{email:'owner@example.invalid',password}})).status,303);
-  const hostile = await fetch(`${issuer}/portal/login`,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded',Origin:'https://untrusted.example'},body:new URLSearchParams({email:'owner@example.invalid',password}),redirect:'manual'});
-  assert.equal(hostile.status,403);
+  for (const origin of ['https://untrusted.example','null',undefined]) {
+    const headers={'Content-Type':'application/x-www-form-urlencoded'};
+    if(origin!==undefined)headers.Origin=origin;
+    const hostile = await fetch(`${issuer}/portal/login`,{method:'POST',headers,body:new URLSearchParams({email:'owner@example.invalid',password}),redirect:'manual'});
+    assert.equal(hostile.status,403,'Untrusted, null and missing origins remain blocked');
+    assert.equal(hostile.headers.get('set-cookie'),null,'Rejected submissions must not establish a session');
+    await hostile.text();
+  }
   const portal = await request('/portal');
   assert.equal(portal.status,200);
   const csrf=portal.text.match(/name="_csrf" value="([^"]+)"/)?.[1];
@@ -129,10 +140,12 @@ try {
   assert.equal(rejected.headers.get('location'),null);
   let result=await follow(await request(`${discovery.authorization_endpoint}?${new URLSearchParams(params)}`));
   assert.equal(result.status,200);
+  assert.equal(result.headers.get('referrer-policy'),'same-origin','OIDC login form preserves the origin too');
   const loginAction=result.text.match(/action="(\/interaction\/[^\"]+\/login)"/)?.[1];
   assert.ok(loginAction,'Authorization shows HB ID login');
   result=await follow(await request(loginAction,{method:'POST',form:{email:'owner@example.invalid',password}}));
   assert.equal(result.status,200);
+  assert.equal(result.headers.get('referrer-policy'),'same-origin','OIDC consent form preserves the origin too');
   const consentAction=result.text.match(/action="(\/interaction\/[^\"]+\/confirm)"/)?.[1];
   assert.ok(consentAction,'Client access requires consent');
   result=await follow(await request(consentAction,{method:'POST',form:{}}));

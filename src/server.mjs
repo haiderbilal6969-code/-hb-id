@@ -37,7 +37,9 @@ if(provider)provider.proxy=true;
 const app=express();
 app.disable('x-powered-by');
 app.set('trust proxy',1);
-app.use(helmet({contentSecurityPolicy:{directives:{'style-src':["'self'","'unsafe-inline'"],'upgrade-insecure-requests':null}}}));
+// Helmet's no-referrer default turns ordinary form POST origins into "null".
+// Preserve the origin for HB ID forms while withholding referrers from other sites.
+app.use(helmet({referrerPolicy:{policy:'same-origin'},contentSecurityPolicy:{directives:{'style-src':["'self'","'unsafe-inline'"],'upgrade-insecure-requests':null}}}));
 app.use('/portal',express.urlencoded({extended:false,limit:'16kb'}));
 app.use('/interaction',express.urlencoded({extended:false,limit:'16kb'}));
 app.use(express.static(new URL('../public/',import.meta.url).pathname,{fallthrough:true,maxAge:'1h'}));

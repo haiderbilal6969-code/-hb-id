@@ -56,6 +56,10 @@ export async function initDatabase() {
     await query(`CREATE TABLE IF NOT EXISTS system_config (
       name TEXT PRIMARY KEY, value JSONB NOT NULL
     )`);
+    await query(`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+      token_hash CHAR(64) PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ
+    )`);
     await query(`CREATE TABLE IF NOT EXISTS wallet_passes (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       status TEXT NOT NULL CHECK (status IN ('pending','ready','failed','unknown')),
@@ -99,6 +103,27 @@ export async function getOrMakeKeys() {
 export async function findByEmail(email){
   const r=await query('SELECT * FROM users WHERE email=$1',[String(email||'').trim().toLowerCase()]);
   return r.rows[0]||null;
+}
+export async function resetPasswordWithToken(token,password){
+  if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token))return false;
+  if(typeof password!=='string'||password.length<14||password.length>200)return false;
+  const client=await pool.connect();
+  try{
+    await client.query('BEGIN');
+    // Always lock the account before any token row to avoid redemption races.
+    await client.query(`SELECT id FROM users WHERE id=(SELECT user_id FROM password_reset_tokens
+      WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW()) FOR UPDATE`,[digest(token)]);
+    const found=await client.query(`SELECT user_id FROM password_reset_tokens
+      WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW() FOR UPDATE`,[digest(token)]);
+    if(!found.rowCount){await client.query('ROLLBACK');return false;}
+    const userId=found.rows[0].user_id;
+    await client.query('UPDATE users SET password_hash=$2 WHERE id=$1',[userId,await hashPassword(password)]);
+    await client.query('UPDATE password_reset_tokens SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL',[userId]);
+    await client.query('DELETE FROM dashboard_sessions WHERE user_id=$1',[userId]);
+    await client.query("DELETE FROM oidc_objects WHERE model<>'Client' AND (payload->>'accountId'=$1 OR grant_id IN (SELECT id FROM oidc_objects WHERE model='Grant' AND payload->>'accountId'=$1))",[String(userId)]);
+    await client.query('COMMIT');return true;
+  }catch(error){await client.query('ROLLBACK');throw error;}
+  finally{client.release();}
 }
 export async function findById(id){
   const r=await query('SELECT id,name,email,email_verified,is_admin FROM users WHERE id=$1',[id]);

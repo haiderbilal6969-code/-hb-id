@@ -82,3 +82,4 @@ a:focus-visible,button:focus-visible,input:focus-visible{outline:2px solid #b6c5
 .form-field input:-webkit-autofill{-webkit-box-shadow:0 0 0 1000px #182234 inset;-webkit-text-fill-color:#f1f3f7}
 .panel,.stat,.identity-methods a{background:#121722}
 ::selection{background:#3c527f;color:#fff}
+[hidden]{display:none!important}

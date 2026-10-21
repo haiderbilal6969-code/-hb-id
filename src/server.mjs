@@ -6,6 +6,8 @@ import { initDatabase, getOrMakeKeys, PostgresOidcAdapter, findByEmail, findById
   deleteDashboardSession, getWalletPass, claimWalletPass, completeWalletPass, failWalletPass } from './db.mjs';
 import { home, portal, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending, walletPage } from './ui.mjs';
 import { createWalletPass, WalletServiceError } from './wallet.mjs';
+import { resetPasswordWithToken } from './db.mjs';
+import { passwordReset } from './ui.mjs';
 
 const ISSUER=(process.env.ISSUER||process.env.URL||'').trim().replace(/\/$/,'');
 if (!ISSUER) throw new Error('Set ISSUER to your exact public HTTPS URL');
@@ -106,6 +108,17 @@ app.use((_req,res,next)=>{
 app.get('/portal/login', async(req,res)=>{
   if(await getDashboardSession(cookies(req).hb_portal))return res.redirect('/portal');
   html(res,portalLogin());
+});
+app.get('/portal/reset-password',(_req,res)=>html(res,passwordReset()));
+app.post('/portal/reset-password',originGuard,rateLimit,async(req,res)=>{
+  const password=req.body?.password;
+  if(typeof password!=='string'||password.length<14||password.length>200||password!==req.body?.confirm){
+    return res.status(400).json({error:'Use matching passwords of 14–200 characters.'});
+  }
+  const ok=await resetPasswordWithToken(req.body?.token,password);
+  if(!ok)return res.status(400).json({error:'This recovery link is invalid, expired, or already used. Request a new one from the platform owner.'});
+  clearPortalCookie(res);clearRateLimit(req);
+  return res.json({ok:true});
 });
 app.post('/portal/login',originGuard,rateLimit,async(req,res)=>{
   const account=await findByEmail(req.body.email);

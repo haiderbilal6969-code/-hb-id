@@ -18,7 +18,7 @@ HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for 
 
 ## Requirements
 
-- Node.js **22+**
+- Node.js **22.x**
 - PostgreSQL database, e.g. [Neon](https://neon.com)
 - HTTPS hostname, e.g. a Vercel production domain
 

@@ -3,7 +3,7 @@
 // Credentials are never accepted in command arguments or printed.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
+import { createHash, createPublicKey, randomBytes, verify, scryptSync } from 'node:crypto';
 import { once } from 'node:events';
 import {testAuthenticator} from './authenticator.mjs';
 
@@ -84,8 +84,25 @@ try {
   const discovery = JSON.parse((await request('/.well-known/openid-configuration')).text);
   assert.equal(discovery.issuer,issuer);
   const keysBefore = JSON.parse((await request(discovery.jwks_uri)).text);
+  const hashFixture=await db.createUser('Hash migration fixture','hash-fixture@example.invalid',password);
+  const legacySalt=randomBytes(16),legacyHash=`scrypt$16384$${legacySalt.toString('hex')}$${scryptSync(password,legacySalt,64,{N:16384,r:8,p:1,maxmem:33554432}).toString('hex')}`;
+  await db.query('UPDATE users SET password_hash=$2 WHERE id=$1',[hashFixture.id,legacyHash]);
+  assert.equal(await db.authenticatePassword('hash-fixture@example.invalid','incorrect-password'),null);
+  const upgraded=await db.authenticatePassword('hash-fixture@example.invalid',password);
+  assert.ok(upgraded.password_hash.startsWith('scrypt$32768$8$3$'));
+  assert.equal(await db.verifyPassword(password,upgraded.password_hash),true);
+  assert.equal(await db.verifyPassword(password,'scrypt$999999999$bad'),false,'Untrusted work factors are rejected');
+  assert.equal(await db.authenticatePassword('missing@example.invalid',password),null);
   const loginPage = await request('/portal/login');
   assert.equal(loginPage.status,200);
+  const csp=loginPage.headers.get('content-security-policy');
+  assert.ok(csp.includes("frame-ancestors 'none'")&&csp.includes("form-action 'self'"));
+  assert.ok(!csp.includes('unsafe-inline'));
+  assert.equal(loginPage.headers.get('x-frame-options'),'DENY');
+  assert.ok(loginPage.headers.get('permissions-policy').includes('publickey-credentials-get=(self)'));
+  assert.ok(!/style=/.test(loginPage.text));
+  for(const publicPath of ['/about','/privacy','/security','/.well-known/security.txt'])assert.equal((await request(publicPath)).status,200);
+
   // no-referrer makes browsers send Origin: null on normal HTML form posts.
   // Keep the origin available inside HB ID without sending referrers elsewhere.
   assert.equal(loginPage.headers.get('referrer-policy'),'same-origin','Browser form submissions must preserve the HB ID origin');
@@ -103,7 +120,13 @@ try {
   let csrf=portal.text.match(/name="_csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf,'Portal supplies a CSRF token');
   assert.equal((await request('/portal/apps',{method:'POST',form:{name:'Test site',redirect_uri:'http://localhost:4000/callback'}})).status,403);
-  const registration=await request('/portal/apps',{method:'POST',form:{_csrf:csrf,name:'Test site',redirect_uri:'http://localhost:4000/callback'}});
+  for(const current_password of ['', 'incorrect-owner-password']){
+    assert.equal((await request('/portal/apps',{method:'POST',form:{_csrf:csrf,current_password,name:'Blocked site',redirect_uri:'https://example.invalid/callback'}})).status,401);
+  }
+  assert.equal((await db.listClients()).length,0,'An owner session alone cannot create clients');
+  assert.equal((await request('/portal/users',{method:'POST',form:{_csrf:csrf,current_password:'wrong',name:'Blocked member',email:'blocked@example.invalid',password}})).status,401);
+  assert.equal(await db.findByEmail('blocked@example.invalid'),null);
+  const registration=await request('/portal/apps',{method:'POST',form:{_csrf:csrf,current_password:password,name:'Test site',redirect_uri:'http://localhost:4000/callback'}});
   assert.equal(registration.status,200);
   const client=(await db.query("SELECT payload FROM oidc_objects WHERE model='Client'")).rows[0].payload;
   assert.ok(client.client_secret,'Confidential client registered');
@@ -253,7 +276,16 @@ try {
   assert.equal((await request('/portal')).status,200);
   result=await follow(await newAuthorization());
   assert.ok(result.callback?.searchParams.get('code'),'OIDC session survives a new provider instance');
-  console.log('PASS: signing keys, portal session and SSO persist across provider restarts');
+  const stillLimited=await request('/portal/passkeys/login/verify',{method:'POST',json:{},headers:{'X-Forwarded-For':'198.51.100.57'}});
+  assert.equal(stillLimited.status,429,'Abuse counters survive provider restarts');
+  const idleToken=await db.createDashboardSession(owner.id);
+  await db.query("UPDATE dashboard_sessions SET last_seen_at=NOW()-interval '31 minutes' WHERE token_hash=$1",[db.digest(idleToken)]);
+  assert.equal(await db.getDashboardSession(idleToken),null,'Idle sessions cannot be revived');
+  assert.equal((await db.listPortalSessions(owner.id,idleToken)).some(s=>s.is_current),false);
+  const ownerEvents=await db.listSecurityEvents(owner.id),memberEvents=await db.listSecurityEvents(member.id);
+  assert.ok(ownerEvents.some(e=>e.action==='website_created'));
+  assert.equal(memberEvents.some(e=>e.action==='website_created'),false,'Events stay inside the owning account');
+  console.log('PASS: signing keys and SSO persist; throttles survive restart; idle sessions expire and events remain private');
   const wrongVerifier=await request(discovery.token_endpoint,{method:'POST',form:{...tokenForm,code:result.callback.searchParams.get('code'),code_verifier:randomBytes(32).toString('base64url')},headers:basic,browser:false});
   assert.equal(wrongVerifier.status,400); assert.equal(JSON.parse(wrongVerifier.text).error,'invalid_grant');
   const replay=await request(discovery.token_endpoint,{method:'POST',form:tokenForm,headers:basic,browser:false});
@@ -328,6 +360,9 @@ try {
   await db.query("UPDATE signup_email_tokens SET expires_at=NOW()-interval '1 second' WHERE token_hash=$1",[db.digest(expired)]);
   assert.equal(await enrollment.completeSignup(expired,'Expired member',signupPassword),null);
   const recoverySession=await db.createDashboardSession(owner.id);
+  await db.savePasskey(owner.id,'Recovery fixture',{credential:{id:'recovery-passkey',publicKey:new Uint8Array([1]),counter:0},credentialDeviceType:'singleDevice',credentialBackedUp:false});
+  const recoveryChallenge=await db.createPasskeyChallenge('register',{userId:String(owner.id),challenge:'recovery-test'});
+
   const resetStart=await request('/portal/forgot-password',{method:'POST',form:{email:'owner@example.invalid'}});
   const unknownStart=await request('/portal/forgot-password',{method:'POST',form:{email:'unknown@example.invalid'}});
   assert.equal(resetStart.status,202);assert.equal(unknownStart.status,202);assert.equal(resetStart.text,unknownStart.text,'Recovery does not reveal account existence');
@@ -341,6 +376,12 @@ try {
   assert.equal(await db.verifyPassword(newPassword,recovered.password_hash),true);
   assert.equal(recovered.email_verified,true,'Only an email-delivered recovery token verifies the address');
   assert.equal(await db.getDashboardSession(recoverySession),null,'Recovery revokes existing portal sessions');
+  assert.equal((await db.listPasskeys(owner.id)).length,0,'Recovery removes previous passkeys');
+  assert.equal(await db.consumePasskeyChallenge(recoveryChallenge,'register'),null,'Recovery cancels registration challenges');
+  assert.equal(await db.createDashboardSession(owner.id,'',{passwordHash:owner.password_hash}),null,'A pre-reset password cannot create a late session');
+  assert.equal(await db.createDashboardSession(owner.id,'',{passkeyId:'recovery-passkey'}),null,'A removed passkey cannot create a late session');
+  assert.equal(await db.savePasskey(owner.id,'Stale registration',{credential:{id:'stale-passkey',publicKey:new Uint8Array([1]),counter:0},credentialDeviceType:'singleDevice',credentialBackedUp:false},db.digest(recoverySession)),false,'Consumed pre-reset registration cannot add a late passkey');
+
   assert.equal(await new db.PostgresOidcAdapter('Grant').find(ownerGrantId),undefined,'Recovery revokes OIDC grants');
   const legacyToken=db.rand(32);
   await db.query("INSERT INTO password_reset_tokens(token_hash,user_id,expires_at) VALUES($1,$2,NOW()+interval '30 minutes')",[db.digest(legacyToken),member.id]);

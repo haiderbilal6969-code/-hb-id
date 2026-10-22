@@ -1,15 +1,16 @@
 import {generateRegistrationOptions,verifyRegistrationResponse,generateAuthenticationOptions,verifyAuthenticationResponse} from '@simplewebauthn/server';
 import {findByEmail,findById,verifyPassword,listPasskeys,savePasskey,findPasskey,updatePasskeyCounter,
-  removePasskey,createPasskeyChallenge,consumePasskeyChallenge,digest} from './db.mjs';
+  removePasskey,createPasskeyChallenge,consumePasskeyChallenge,digest,recordSecurityEvent} from './db.mjs';
 
 export function installPasskeyRoutes(app,{issuerUrl,originGuard,requirePortal,csrfGuard,rateLimit,
   clearRateLimit,cookies,provider,finishPortalLogin}){
   const secure=issuerUrl.protocol==='https:';
   const cookieOptions={httpOnly:true,secure,sameSite:'strict',path:'/',maxAge:300000};
+  const cookieName=secure?'__Host-hb_passkey':'hb_passkey';
   const fail=(res,message='The passkey could not be verified. Please try again.',status=400)=>res.status(status).json({error:message});
-  function setChallenge(res,token){res.cookie('hb_passkey',token,cookieOptions);}
+  function setChallenge(res,token){res.cookie(cookieName,token,cookieOptions);}
   async function takeChallenge(req,res,purpose){
-    res.clearCookie('hb_passkey',{httpOnly:true,secure,sameSite:'strict',path:'/'});
+    res.clearCookie(cookieName,{httpOnly:true,secure,sameSite:'strict',path:'/'});
     return consumePasskeyChallenge(cookies(req).hb_passkey,purpose);
   }
   async function interaction(req,res){
@@ -31,7 +32,7 @@ export function installPasskeyRoutes(app,{issuerUrl,originGuard,requirePortal,cs
       authenticatorSelection:{residentKey:'required',userVerification:'required'}});
     const token=await createPasskeyChallenge('register',{challenge:options.challenge,userId:String(account.id),
       session:digest(cookies(req).hb_portal),name});
-    setChallenge(res,token);clearRateLimit(req);res.json(options);
+    setChallenge(res,token);await clearRateLimit(req);res.json(options);
   });
   app.post('/portal/passkeys/register/verify',originGuard,requirePortal,csrfGuard,async(req,res)=>{
     const saved=await takeChallenge(req,res,'register');
@@ -41,14 +42,16 @@ export function installPasskeyRoutes(app,{issuerUrl,originGuard,requirePortal,cs
       expectedOrigin:issuerUrl.origin,expectedRPID:issuerUrl.hostname,requireUserVerification:true,supportedAlgorithmIDs:[-7,-257]});}
     catch{return fail(res);}
     if(!result.verified)return fail(res);
-    try{await savePasskey(saved.userId,saved.name,result.registrationInfo);}
+    try{if(!await savePasskey(saved.userId,saved.name,result.registrationInfo,saved.session))return fail(res,'Your session expired. Sign in and start again.');}
     catch(error){if(error.code==='23505')return fail(res,'That passkey is already registered.');throw error;}
+    await recordSecurityEvent(saved.userId,'passkey_added');
     res.json({ok:true,redirect:'/portal/security?result=passkey-added'});
   });
   app.post('/portal/passkeys/remove',originGuard,requirePortal,csrfGuard,rateLimit,async(req,res)=>{
     const account=await findByEmail(req.portalSession.email);
     if(!account||typeof req.body.password!=='string'||!await verifyPassword(req.body.password,account.password_hash))return res.redirect(303,'/portal/security?result=password-incorrect');
-    await removePasskey(account.id,String(req.body.id||''));clearRateLimit(req);
+    await removePasskey(account.id,String(req.body.id||''));await clearRateLimit(req);
+    await recordSecurityEvent(account.id,'passkey_removed');
     res.redirect(303,'/portal/security?result=passkey-removed');
   });
   async function options(req,res){
@@ -74,12 +77,14 @@ export function installPasskeyRoutes(app,{issuerUrl,originGuard,requirePortal,cs
     catch{return fail(res);}
     if(!result.verified||!await updatePasskeyCounter(credential.id,credential.counter,result.authenticationInfo))return fail(res);
     if(!await findById(credential.user_id))return fail(res);
-    clearRateLimit(req);
+    await clearRateLimit(req);
     if(saved.uid){
       const redirect=await provider.interactionResult(req,res,{login:{accountId:String(credential.user_id),amr:['webauthn']}},{mergeWithLastSubmission:false});
+      await recordSecurityEvent(credential.user_id,'passkey_sign_in');
       res.json({ok:true,redirect});
     }else{
-      await finishPortalLogin(req,res,credential.user_id);
+      if(!await finishPortalLogin(req,res,credential.user_id,{passkeyId:credential.id}))return fail(res);
+      await recordSecurityEvent(credential.user_id,'passkey_sign_in');
       res.json({ok:true,redirect:'/portal'});
     }
   }

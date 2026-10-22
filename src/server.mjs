@@ -1,11 +1,13 @@
 import express from 'express';
 import helmet from 'helmet';
+import {createHmac} from 'node:crypto';
 import { Provider } from 'oidc-provider';
 import { initDatabase, getOrMakeKeys, PostgresOidcAdapter, findByEmail, findById, verifyPassword,
   createClient, listClients, listUsers, createUser, createDashboardSession, getDashboardSession,
   deleteDashboardSession, getWalletPass, claimWalletPass, completeWalletPass, failWalletPass,
-  listPasskeys,listPortalSessions,revokePortalSession,updateProfile,listAuthorizedApps,revokeAuthorizedApp } from './db.mjs';
-import { home, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending, walletPage } from './ui.mjs';
+  listPasskeys,listPortalSessions,revokePortalSession,updateProfile,listAuthorizedApps,revokeAuthorizedApp,
+  authenticatePassword,consumeAuthLimit,clearAuthLimit,recordSecurityEvent,listSecurityEvents } from './db.mjs';
+import { home, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending, walletPage, informationPage } from './ui.mjs';
 import {portal} from './dashboard.mjs';
 import {installPasskeyRoutes} from './passkeys.mjs';
 import { createWalletPass, getWalletUsage, WalletServiceError } from './wallet.mjs';
@@ -46,7 +48,14 @@ app.disable('x-powered-by');
 app.set('trust proxy',1);
 // Helmet's no-referrer default turns ordinary form POST origins into "null".
 // Preserve the origin for HB ID forms while withholding referrers from other sites.
-app.use(helmet({referrerPolicy:{policy:'same-origin'},contentSecurityPolicy:{directives:{'style-src':["'self'","'unsafe-inline'"],'upgrade-insecure-requests':null}}}));
+app.use(helmet({referrerPolicy:{policy:'same-origin'},frameguard:{action:'deny'},
+  strictTransportSecurity:{maxAge:31536000,includeSubDomains:false},
+  contentSecurityPolicy:{directives:{'default-src':["'self'"],'script-src':["'self'"],
+    'script-src-attr':["'none'"],'style-src':["'self'"],'style-src-attr':["'none'"],
+    'connect-src':["'self'"],'font-src':["'self'"],'img-src':["'self'",'data:'],
+    'object-src':["'none'"],'base-uri':["'none'"],'frame-ancestors':["'none'"],
+    'form-action':["'self'"],'upgrade-insecure-requests':issuerUrl.protocol==='https:'?[]:null}}}));
+app.use((_req,res,next)=>{res.set('Permissions-Policy','camera=(), microphone=(), geolocation=(), payment=(), publickey-credentials-get=(self), publickey-credentials-create=(self)');next();});
 app.use(['/portal','/interaction'],(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
 // Keep hosted UI on the issuer that owns its cookies and WebAuthn credentials.
 // An alternate deployment URL must never become an extra trusted form origin.
@@ -68,7 +77,15 @@ function requestError(req,res,title,message,status){
   if(jsonRequest(req))return res.status(status).json({error:message});
   return html(res,errorPage(title,message,status),status);
 }
-function cookies(req){return Object.fromEntries((req.headers.cookie||'').split(';').map(x=>x.trim().split(/=(.*)/s).slice(0,2)).filter(x=>x[0]).map(([k,v])=>[k,decodeURIComponent(v||'')]));}
+function cookies(req){
+  const values={};
+  for(const part of (req.headers.cookie||'').split(';')){
+    const match=/^\s*([^=\s]+)=(.*)$/.exec(part);if(!match)continue;
+    try{values[match[1]]=decodeURIComponent(match[2]);}catch{/* Ignore malformed cookies. */}
+  }
+  if(secureCookie){values.hb_portal=values['__Host-hb_portal'];values.hb_passkey=values['__Host-hb_passkey'];}
+  return values;
+}
 function originGuard(req,res,next){
   const origin=req.get('origin');
   // Older browsers can omit Origin. Accept only an exact trusted Referer
@@ -81,20 +98,20 @@ function originGuard(req,res,next){
   if(!trusted)return requestError(req,res,'Request blocked','Please reopen HB ID from its sign-in page and try again.',403);
   next();
 }
-const limiter=new Map();
-function rateLimit(req,res,next){
-  const key=String(req.ip||'unknown')+':'+req.path.replace(/\/interaction\/[a-z0-9_-]+\/login/i,'/interaction/login');
-  const now=Date.now();
-  if(limiter.size>5000){for(const [k,v] of limiter){if(now-v.since>900000)limiter.delete(k);}}
-  let record=limiter.get(key);
-  if(!record||now-record.since>900000){record={since:now,count:0};limiter.set(key,record);}
-  record.count++;
-  if(record.count>8){res.set('Retry-After','900');return requestError(req,res,'Too many attempts','Too many attempts. Wait 15 minutes before trying again.',429);}
-  req.rateLimitKey=key;next();
+const limitKey=value=>createHmac('sha256',identityKeys.cookieKeys[0]).update(value).digest('hex');
+async function rateLimit(req,res,next){
+  const route=req.path.replace(/^\/interaction\/[^/]+/,'/interaction');
+  req.rateLimitKeys=[limitKey(`ip:${req.ip||'unknown'}:${route}`)];
+  if(typeof req.body?.email==='string')req.rateLimitKeys.push(limitKey(`account:${req.body.email.trim().toLowerCase()}:${route}`));
+  let allowed=true;
+  for(const [index,key] of req.rateLimitKeys.entries())if(!await consumeAuthLimit(key,index===0?8:20))allowed=false;
+  if(!allowed){res.set('Retry-After','900');return requestError(req,res,'Too many attempts','Too many attempts. Wait 15 minutes before trying again.',429);}
+  next();
 }
-const clearRateLimit=req=>limiter.delete(req.rateLimitKey);
-function setPortalCookie(res,token){res.cookie('hb_portal',token,{httpOnly:true,secure:secureCookie,sameSite:'lax',path:'/',maxAge:12*3600*1000});}
-function clearPortalCookie(res){res.clearCookie('hb_portal',{httpOnly:true,secure:secureCookie,sameSite:'lax',path:'/'});}
+const clearRateLimit=async req=>{for(const key of req.rateLimitKeys||[])await clearAuthLimit(key);};
+const portalCookieName=secureCookie?'__Host-hb_portal':'hb_portal';
+function setPortalCookie(res,token){if(secureCookie)res.clearCookie('hb_portal',{path:'/'});res.cookie(portalCookieName,token,{httpOnly:true,secure:secureCookie,sameSite:'lax',path:'/',maxAge:12*3600*1000});}
+function clearPortalCookie(res){res.clearCookie(portalCookieName,{httpOnly:true,secure:secureCookie,sameSite:'lax',path:'/'});}
 async function requirePortal(req,res,next){
   const user=await getDashboardSession(cookies(req).hb_portal);
   if(!user){if(jsonRequest(req))return res.status(401).json({error:'Your session expired. Please sign in again.',redirect:'/portal/login'});return res.redirect('/portal/login');}
@@ -102,6 +119,14 @@ async function requirePortal(req,res,next){
 }
 function requireAdmin(req,res,next){if(!req.portalSession?.is_admin)return requestError(req,res,'Admin access required','Only the platform administrator can manage applications and accounts.',403);next();}
 function csrfGuard(req,res,next){if(!req.portalSession||!req.body?._csrf||req.body._csrf!==req.portalSession.csrf)return requestError(req,res,'Security check failed','Please reopen the portal page and try again.',403);next();}
+async function confirmOwnerPassword(req,res,next){
+  const account=await findByEmail(req.portalSession.email);
+  if(!account||!await verifyPassword(req.body?.current_password,account.password_hash)){
+    await recordSecurityEvent(req.portalSession.id,'owner_check_failed');
+    return requestError(req,res,'Confirm your password','Enter your current HB ID password to approve this owner action.',401);
+  }
+  await clearRateLimit(req);next();
+}
 function validRedirect(input){
   try{
     const u=new URL(String(input||''));
@@ -112,20 +137,22 @@ function validRedirect(input){
 }
 async function renderPortal(req,res,{message='',error='',created=null,view}={}){
   const session=req.portalSession;
-  const [apps,users,passkeys,sessions,connections,pass]=await Promise.all([
+  const [apps,users,passkeys,sessions,connections,pass,events]=await Promise.all([
     session.is_admin?listClients():[],session.is_admin?listUsers():[],listPasskeys(session.id),
-    listPortalSessions(session.id,cookies(req).hb_portal),listAuthorizedApps(session.id),getWalletPass(session.id)]);
+    listPortalSessions(session.id,cookies(req).hb_portal),listAuthorizedApps(session.id),getWalletPass(session.id),listSecurityEvents(session.id)]);
   const results={'profile-saved':'Your profile has been saved.','session-revoked':'That portal session has been signed out.',
     'app-disconnected':'Website permission removed. It will need your consent again.','passkey-added':'Your passkey is ready. Use it next time you sign in.',
     'passkey-removed':'Passkey removed from HB ID.'};
   const selected=view||req.path.split('/')[2]||'overview';
   res.set('Cache-Control','no-store');
-  html(res,portal({session,apps,users,passkeys,sessions,connections,pass,created,issuer:ISSUER,view:selected,
+  html(res,portal({session,apps,users,passkeys,sessions,connections,pass,events,created,issuer:ISSUER,view:selected,
     mailConfigured:emailSettings().ready,message:message||results[req.query.result]||'',error:error||(req.query.result==='password-incorrect'?'Your current password is incorrect.':'')}));
 }
 app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady}));
 app.get('/readyz', (_req,res)=>res.status(ownerReady?200:503).json({ready:ownerReady}));
 app.get('/', (_req,res)=>html(res,home({issuer:ISSUER})));
+app.get(['/about','/privacy','/security'],(req,res)=>html(res,informationPage(req.path.slice(1))));
+app.get('/.well-known/security.txt',(_req,res)=>res.type('text/plain').send(`Contact: mailto:haidermalik@devolper.online\nExpires: 2027-04-22T00:00:00Z\nPreferred-Languages: en\nCanonical: ${ISSUER}/.well-known/security.txt\nPolicy: ${ISSUER}/security\n`));
 // Only the hosting account owner can seed an administrator through private env vars.
 // There is deliberately no public first-user enrollment route.
 app.use((_req,res,next)=>{
@@ -147,20 +174,21 @@ app.post('/portal/reset-password',originGuard,rateLimit,async(req,res)=>{
   }
   const ok=await resetPasswordWithToken(req.body?.token,password);
   if(!ok)return res.status(400).json({error:'This recovery link is invalid, expired, or already used. Request a new one from Forgot password.'});
-  clearPortalCookie(res);clearRateLimit(req);
+  clearPortalCookie(res);await clearRateLimit(req);
   return res.json({ok:true});
 });
 app.post('/portal/login',originGuard,rateLimit,async(req,res)=>{
-  const account=await findByEmail(req.body.email);
-  const valid=account && await verifyPassword(String(req.body.password||''),account.password_hash);
-  if(!valid)return html(res,portalLogin('Invalid email or password.'),401);
-  clearRateLimit(req);
-  await finishPortalLogin(req,res,account.id);
+  const account=await authenticatePassword(req.body.email,req.body.password);
+  if(!account){await recordSecurityEvent(null,'sign_in_failed');return html(res,portalLogin('Invalid email or password.'),401);}
+  if(!await finishPortalLogin(req,res,account.id,{passwordHash:account.password_hash}))return html(res,portalLogin('Please sign in again.'),401);
+  await clearRateLimit(req);await recordSecurityEvent(account.id,'password_sign_in');
   res.redirect(303,'/portal');
 });
-async function finishPortalLogin(req,res,userId){
+async function finishPortalLogin(req,res,userId,credential={}){
+  const token=await createDashboardSession(userId,req.get('user-agent')||'',credential);
+  if(!token)return false;
   await deleteDashboardSession(cookies(req).hb_portal);
-  setPortalCookie(res,await createDashboardSession(userId,req.get('user-agent')||''));
+  setPortalCookie(res,token);return true;
 }
 installPasskeyRoutes(app,{issuerUrl,originGuard,requirePortal,csrfGuard,rateLimit,clearRateLimit,cookies,provider,finishPortalLogin});
 app.get('/portal',requirePortal,async(req,res)=>renderPortal(req,res));
@@ -214,22 +242,23 @@ app.post('/portal/wallet/create',originGuard,requirePortal,csrfGuard,async(req,r
 app.post('/portal/logout',originGuard,requirePortal,csrfGuard,async(req,res)=>{
   await deleteDashboardSession(cookies(req).hb_portal);clearPortalCookie(res);res.redirect(303,'/');
 });
-app.post('/portal/apps',originGuard,requirePortal,requireAdmin,csrfGuard,async(req,res)=>{
+app.post('/portal/apps',originGuard,requirePortal,requireAdmin,csrfGuard,rateLimit,confirmOwnerPassword,async(req,res)=>{
   const name=String(req.body.name||'').trim();
   const redirect=String(req.body.redirect_uri||'').trim();
   if(name.length<2||name.length>90)return renderPortal(req,res,{view:'apps',error:'Application name must be 2–90 characters.'});
   if(!validRedirect(redirect))return renderPortal(req,res,{view:'apps',error:'Use a valid HTTPS callback URL. Only localhost may use HTTP for testing.'});
   const created=await createClient(name,redirect);
+  await recordSecurityEvent(req.portalSession.id,'website_created');
   return renderPortal(req,res,{view:'apps',created,message:`${name} has been registered. Copy the client secret now.`});
 });
-app.post('/portal/users',originGuard,requirePortal,requireAdmin,csrfGuard,async(req,res)=>{
+app.post('/portal/users',originGuard,requirePortal,requireAdmin,csrfGuard,rateLimit,confirmOwnerPassword,async(req,res)=>{
   const name=String(req.body.name||'').trim();
   const email=String(req.body.email||'').trim().toLowerCase();
   const password=String(req.body.password||'');
   if(name.length<2||name.length>100||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<14||password.length>200){
     return renderPortal(req,res,{view:'members',error:'Enter a valid name, email and unique password of 14–200 characters.'});
   }
-  try{await createUser(name,email,password);return renderPortal(req,res,{view:'members',message:`Account created for ${name}. Give the temporary password to that person privately.`});}
+  try{await createUser(name,email,password);await recordSecurityEvent(req.portalSession.id,'member_created');return renderPortal(req,res,{view:'members',message:`Account created for ${name}. Give the temporary password to that person privately.`});}
   catch(e){if(e.code==='23505')return renderPortal(req,res,{view:'members',error:'An account already exists for that email.'});throw e;}
 });
 // oidc-provider uses signed cookies to bind the interaction to its authorization request.
@@ -246,13 +275,13 @@ app.get('/interaction/:uid',async(req,res)=>{
 app.post('/interaction/:uid/login',originGuard,rateLimit,async(req,res)=>{
   const details=await provider.interactionDetails(req,res);
   if(details.uid!==req.params.uid||details.prompt.name!=='login')return html(res,errorPage('Invalid login flow','Please restart the sign-in.',400),400);
-  const user=await findByEmail(req.body.email);
-  const valid=user && await verifyPassword(String(req.body.password||''),user.password_hash);
-  if(!valid){
+  const user=await authenticatePassword(req.body.email,req.body.password);
+  if(!user){
+    await recordSecurityEvent(null,'sign_in_failed');
     const client=await provider.Client.find(details.params.client_id);
     return html(res,interactionLogin({clientName:client?.clientName||'the website',uid:details.uid,error:'Invalid email or password.',email:String(req.body.email||'').slice(0,250)}),401);
   }
-  clearRateLimit(req);
+  await clearRateLimit(req);await recordSecurityEvent(user.id,'password_sign_in');
   await provider.interactionFinished(req,res,{login:{accountId:String(user.id)}},{mergeWithLastSubmission:false});
 });
 app.post('/interaction/:uid/confirm',originGuard,async(req,res)=>{

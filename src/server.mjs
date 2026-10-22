@@ -11,6 +11,8 @@ import {installPasskeyRoutes} from './passkeys.mjs';
 import { createWalletPass, WalletServiceError } from './wallet.mjs';
 import { resetPasswordWithToken } from './db.mjs';
 import { passwordReset } from './ui.mjs';
+import {installEmailAccountRoutes} from './enrollment.mjs';
+import {emailSettings} from './email.mjs';
 
 const ISSUER=(process.env.ISSUER||process.env.URL||'').trim().replace(/\/$/,'');
 if (!ISSUER) throw new Error('Set ISSUER to your exact public HTTPS URL');
@@ -105,7 +107,7 @@ async function renderPortal(req,res,{message='',error='',created=null,view}={}){
   const selected=view||req.path.split('/')[2]||'overview';
   res.set('Cache-Control','no-store');
   html(res,portal({session,apps,users,passkeys,sessions,connections,pass,created,issuer:ISSUER,view:selected,
-    message:message||results[req.query.result]||'',error:error||(req.query.result==='password-incorrect'?'Your current password is incorrect.':'')}));
+    mailConfigured:emailSettings().ready,message:message||results[req.query.result]||'',error:error||(req.query.result==='password-incorrect'?'Your current password is incorrect.':'')}));
 }
 app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady}));
 app.get('/readyz', (_req,res)=>res.status(ownerReady?200:503).json({ready:ownerReady}));
@@ -121,6 +123,7 @@ app.get('/portal/login', async(req,res)=>{
   if(await getDashboardSession(cookies(req).hb_portal))return res.redirect('/portal');
   html(res,portalLogin());
 });
+installEmailAccountRoutes(app,{issuer:ISSUER,originGuard,rateLimit});
 app.get('/portal/reset-password',(_req,res)=>html(res,passwordReset()));
 app.post('/portal/reset-password',originGuard,rateLimit,async(req,res)=>{
   const password=req.body?.password;
@@ -128,7 +131,7 @@ app.post('/portal/reset-password',originGuard,rateLimit,async(req,res)=>{
     return res.status(400).json({error:'Use matching passwords of 14–200 characters.'});
   }
   const ok=await resetPasswordWithToken(req.body?.token,password);
-  if(!ok)return res.status(400).json({error:'This recovery link is invalid, expired, or already used. Request a new one from the platform owner.'});
+  if(!ok)return res.status(400).json({error:'This recovery link is invalid, expired, or already used. Request a new one from Forgot password.'});
   clearPortalCookie(res);clearRateLimit(req);
   return res.json({ok:true});
 });

@@ -75,6 +75,14 @@ export async function initDatabase() {
       token_hash CHAR(64) PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ
     )`);
+    await query('ALTER TABLE password_reset_tokens ADD COLUMN IF NOT EXISTS verifies_email BOOLEAN NOT NULL DEFAULT FALSE');
+    await query(`CREATE TABLE IF NOT EXISTS signup_email_tokens (
+      token_hash CHAR(64) PRIMARY KEY, email VARCHAR(320) NOT NULL UNIQUE,
+      expires_at TIMESTAMPTZ NOT NULL, used_at TIMESTAMPTZ
+    )`);
+    await query(`CREATE TABLE IF NOT EXISTS email_send_limits (
+      key TEXT PRIMARY KEY, count INTEGER NOT NULL, reset_at TIMESTAMPTZ NOT NULL
+    )`);
     await query(`CREATE TABLE IF NOT EXISTS wallet_passes (
       user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
       status TEXT NOT NULL CHECK (status IN ('pending','ready','failed','unknown')),
@@ -128,11 +136,11 @@ export async function resetPasswordWithToken(token,password){
     // Always lock the account before any token row to avoid redemption races.
     await client.query(`SELECT id FROM users WHERE id=(SELECT user_id FROM password_reset_tokens
       WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW()) FOR UPDATE`,[digest(token)]);
-    const found=await client.query(`SELECT user_id FROM password_reset_tokens
+    const found=await client.query(`SELECT user_id,verifies_email FROM password_reset_tokens
       WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW() FOR UPDATE`,[digest(token)]);
     if(!found.rowCount){await client.query('ROLLBACK');return false;}
     const userId=found.rows[0].user_id;
-    await client.query('UPDATE users SET password_hash=$2 WHERE id=$1',[userId,await hashPassword(password)]);
+    await client.query('UPDATE users SET password_hash=$2,email_verified=email_verified OR $3 WHERE id=$1',[userId,await hashPassword(password),found.rows[0].verifies_email]);
     await client.query('UPDATE password_reset_tokens SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL',[userId]);
     await client.query('DELETE FROM dashboard_sessions WHERE user_id=$1',[userId]);
     await client.query("DELETE FROM oidc_objects WHERE model<>'Client' AND (payload->>'accountId'=$1 OR grant_id IN (SELECT id FROM oidc_objects WHERE model='Grant' AND payload->>'accountId'=$1))",[String(userId)]);

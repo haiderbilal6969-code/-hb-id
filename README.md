@@ -2,7 +2,7 @@
 
 HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for connecting websites under your own name. All login pages use the HB ID brand.
 
-> **Security status: early MVP / invite-only. Not independently security-audited.** Do not use for sensitive production accounts, patient information, healthcare systems, financial accounts or public signups. Before production you need verified email, audited recovery, enforced MFA, account lockout policies, audit logging, monitoring, incident response, secure account management, penetration testing and high-availability hosting.
+> **Security status: early MVP. Not independently security-audited.** Do not use for sensitive production accounts, patient information, healthcare systems, financial accounts or high-volume public signups without a review. Before production you need verified email, audited recovery, enforced MFA, account lockout policies, audit logging, monitoring, incident response, secure account management, penetration testing and high-availability hosting.
 
 ## What works in the project
 
@@ -11,10 +11,12 @@ HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for 
 - Per-user portal session listing and sign-out, profile editing, and OIDC grant disconnection.
 - Owner-only developer and member directories; members see only their own identity data.
 - OIDC website registration with copyable client settings, exact callbacks, and one-time secret display.
-- Owner-issued, single-use password recovery links revoke existing sessions.
+- Email-first public signup: the email link is verified before a member account or password is created.
+- SMTP email recovery plus existing owner-issued, single-use password recovery links; successful recovery revokes existing sessions.
+- Server-only Spacemail SMTP integration and PostgreSQL-backed sending limits. See [EMAIL_SETUP.md](EMAIL_SETUP.md).
 - Users stored in PostgreSQL; passwords hashed and salted with Node.js scrypt.
 - Administrator account bootstrapped once from secure environment variables.
-- Admin-created member accounts (invite-only).
+- Admin-created member accounts, plus verified public signup when SMTP credentials are configured.
 - Admin creates OIDC client IDs, secrets and approved redirect URLs.
 - Standards-based Authorization Code Flow / OIDC Discovery / JWKS / Token / UserInfo via the widely used `oidc-provider` library.
 - Explicit consent screen for client permissions.
@@ -72,9 +74,9 @@ Do not embed client secrets inside public HTML, JavaScript, mobile binaries or a
 - OIDC sessions/grants and key material are persisted in PostgreSQL.
 - CSRF protection uses same-origin checks on interaction forms, plus a session CSRF token on administration forms.
 - The password limiter is an **instance-local basic control only**, not a substitute for distributed rate limiting and bot protection. Deploy a managed edge/WAF and implement proper audit alerts before inviting external customers.
-- Account email verification is intentionally **not implemented** and unverified addresses are **not released to OIDC clients**. Admin provisioned users can still sign in and receive stable `sub` and profile `name` claims.
+- Public signup requires a one-use email link before creating a member account; email-delivered password recovery also verifies the address. Owner-issued recovery alone does not verify email. Unverified addresses are **not released to OIDC clients**. Admin provisioned users can still sign in and receive stable `sub` and profile `name` claims.
 - Do not advertise HB ID as formally OpenID Certified; it uses a certified library, but your deployment is not itself certified.
-- Client management is owner/admin-only. Self-service third-party developer signup, email verification workflows, enforced MFA and self-service email recovery require more work. Optional passkeys are a sign-in alternative, not enforced two-factor authentication.
+- Client management is owner/admin-only. Self-service third-party developer registration, enforced MFA and operational security controls require more work. Optional passkeys are a sign-in alternative, not enforced two-factor authentication.
 - Any failure of the database will prevent logins; back up the database and design for HA before production.
 - RSA keys and cookie secrets currently reside in Postgres; production deployments should use managed secret storage/KMS, encryption at rest, and key rotation.
 
@@ -87,6 +89,8 @@ HB-ID/
   src/ui.mjs            # Accessible branded HTML server-rendered views
   src/dashboard.mjs     # Account, security, developer and member views
   src/passkeys.mjs      # WebAuthn registration and authentication routes
+  src/email.mjs         # Server-only SMTP configuration and branded emails
+  src/enrollment.mjs    # Verified signup, email recovery and persistent quotas
   public/portal.js      # Passkey ceremonies and copy controls
   public/style.css      # Mobile-first dark identity UI
   example-client/       # Separate website sign-in example

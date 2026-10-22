@@ -67,6 +67,8 @@ try {
   assert.equal(JSON.parse((await request('/healthz')).text).ready,false);
   assert.equal((await request('/readyz')).status,503);
   assert.equal((await request('/portal/login')).status,503);
+  const pendingApi=await request('/portal/passkeys/login/options',{method:'POST',json:{}});
+  assert.equal(pendingApi.status,503);assert.equal(typeof JSON.parse(pendingApi.text).error,'string');
   assert.equal((await request('/setup',{method:'POST',form:{email:'intruder@example.invalid'}})).status,503);
   console.log('PASS: missing owner keeps sign-in and public setup closed');
 
@@ -105,6 +107,20 @@ try {
   assert.equal(registration.status,200);
   const client=(await db.query("SELECT payload FROM oidc_objects WHERE model='Client'")).rows[0].payload;
   assert.ok(client.client_secret,'Confidential client registered');
+  const rejectedPasskey=await request('/portal/passkeys/login/options',{method:'POST',json:{},browser:false,headers:{Origin:'https://foreign.example'}});
+  assert.equal(rejectedPasskey.status,403);assert.match(rejectedPasskey.headers.get('content-type'),/application\/json/);
+  assert.equal(typeof JSON.parse(rejectedPasskey.text).error,'string');
+  const noPasskeySession=await request('/portal/passkeys/register/options',{method:'POST',json:{},browser:false,headers:{Origin:issuer}});
+  assert.equal(noPasskeySession.status,401);assert.equal(JSON.parse(noPasskeySession.text).redirect,'/portal/login');
+  const failedCsrf=await request('/portal/passkeys/register/options',{method:'POST',json:{_csrf:'wrong',password}});
+  assert.equal(failedCsrf.status,403);assert.match(failedCsrf.headers.get('content-type'),/application\/json/);
+  for(let attempt=0;attempt<9;attempt++){
+    const limited=await request('/portal/passkeys/login/verify',{method:'POST',json:{},headers:{'X-Forwarded-For':'198.51.100.57'}});
+    if(attempt===8){assert.equal(limited.status,429);assert.equal(limited.headers.get('retry-after'),'900');assert.match(JSON.parse(limited.text).error,/15 minutes/);}
+  }
+  const malformed=await fetch(issuer+'/portal/passkeys/login/options',{method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json',Origin:issuer},body:'{invalid-json',redirect:'manual'});
+  assert.equal(malformed.status,400);assert.equal(typeof (await malformed.json()).error,'string');
+  console.log('PASS: passkey origin, CSRF, expired-session, malformed-request and rate-limit failures return JSON with readable errors');
   console.log('PASS: owner bootstrap is idempotent; origin checks, CSRF and client registration');
   for(const path of ['/portal/security','/portal/apps','/portal/members','/portal/connections','/portal/profile']){
     const page=await request(path);assert.equal(page.status,200);assert.equal(page.headers.get('cache-control'),'no-store');

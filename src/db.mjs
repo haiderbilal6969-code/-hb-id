@@ -174,7 +174,7 @@ export async function getDashboardSession(token){
 }
 export async function deleteDashboardSession(token){ if(token) await query('DELETE FROM dashboard_sessions WHERE token_hash=$1',[digest(token)]); }
 export async function getWalletPass(userId){
-  const r=await query('SELECT status,google_save_url,share_url,updated_at FROM wallet_passes WHERE user_id=$1',[userId]);
+  const r=await query('SELECT status,google_save_url,share_url,error_code,updated_at FROM wallet_passes WHERE user_id=$1',[userId]);
   return r.rows[0]||null;
 }
 export async function claimWalletPass(userId){

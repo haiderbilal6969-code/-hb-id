@@ -52,3 +52,13 @@ initial owner credentials are separate setup steps.
   in `VERCEL_DEPLOYMENT.md`.
 
 Provider API reference: https://www.walletwallet.dev/llms.txt
+
+## Connection checks
+
+The signed-in Wallet page checks the provider's read-only usage endpoint and shows
+connection problems before card creation. Owners also see the remaining allowance.
+An existing ready card stays usable when the provider is temporarily unavailable.
+Deployment builds run `npm run check:wallet`, which validates the private production
+key against the same read-only endpoint and prints only a safe status and numeric
+allowance. It does not create or update passes, change plans, or print credentials.
+A disconnected Wallet service does not block unrelated login fixes from deploying.

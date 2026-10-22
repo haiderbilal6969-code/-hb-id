@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {createWalletPass,walletPassBody} from '../src/wallet.mjs';
+import {createWalletPass,walletPassBody,getWalletUsage} from '../src/wallet.mjs';
 const issuer='https://identity.example';
 const serialNumber='de9583fe-7209-4f13-88dd-74a02a404415';
 const response={serialNumber,googleSaveUrl:'https://pay.google.com/gp/v/save/test-only',shareUrl:`https://pass.walletwallet.dev/p/${serialNumber}`};
@@ -50,4 +50,15 @@ test('untrusted provider links cannot become portal redirect targets',async()=>{
 test('provider rejection is retryable without leaking its response',async()=>{
  let calls=0;
  await assert.rejects(createWalletPass({name:'Member'},{issuer,apiKey:'test',fetchImpl:async()=>++calls===1?json({remaining:1}):json({error:'provider-private-data'},401)}),e=>e.code==='provider_auth'&&!e.uncertain&&!e.message.includes('provider-private-data'));
+});
+test('Wallet connection check reads usage without issuing or revealing provider data',async()=>{
+ const calls=[];
+ const usage=await getWalletUsage({apiKey:'private-test-key',fetchImpl:async(url,options)=>{
+  calls.push({url,options});return json({remaining:12,limit:20,count:8,plan:'free',privateField:'must-not-leak'});
+ }});
+ assert.equal(calls.length,1);assert.equal(calls[0].url,'https://api.walletwallet.dev/api/auth/usage');
+ assert.equal(calls[0].options.method,undefined);assert.equal(calls[0].options.redirect,'error');
+ assert.deepEqual(usage,{remaining:12,limit:20,count:8,plan:'free'});
+ assert.equal(JSON.stringify(usage).includes('private'),false);
+ for(const status of [401,500])await assert.rejects(getWalletUsage({apiKey:'private-test-key',fetchImpl:async()=>json({error:'private-provider-message'},status)}),e=>!e.message.includes('private-provider-message'));
 });

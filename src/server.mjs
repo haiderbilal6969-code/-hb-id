@@ -8,7 +8,7 @@ import { initDatabase, getOrMakeKeys, PostgresOidcAdapter, findByEmail, findById
 import { home, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending, walletPage } from './ui.mjs';
 import {portal} from './dashboard.mjs';
 import {installPasskeyRoutes} from './passkeys.mjs';
-import { createWalletPass, WalletServiceError } from './wallet.mjs';
+import { createWalletPass, getWalletUsage, WalletServiceError } from './wallet.mjs';
 import { resetPasswordWithToken } from './db.mjs';
 import { passwordReset } from './ui.mjs';
 import {installEmailAccountRoutes} from './enrollment.mjs';
@@ -48,12 +48,26 @@ app.set('trust proxy',1);
 // Preserve the origin for HB ID forms while withholding referrers from other sites.
 app.use(helmet({referrerPolicy:{policy:'same-origin'},contentSecurityPolicy:{directives:{'style-src':["'self'","'unsafe-inline'"],'upgrade-insecure-requests':null}}}));
 app.use(['/portal','/interaction'],(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
+// Keep hosted UI on the issuer that owns its cookies and WebAuthn credentials.
+// An alternate deployment URL must never become an extra trusted form origin.
+app.use((req,res,next)=>{
+  if(process.env.VERCEL&&issuerUrl.protocol==='https:'&&['GET','HEAD'].includes(req.method)&&
+    (req.path==='/'||req.path==='/portal'||req.path.startsWith('/portal/')||req.path==='/wallet/login')&&req.hostname!==issuerUrl.hostname){
+    res.set('Cache-Control','no-store');return res.redirect(307,ISSUER+req.originalUrl);
+  }
+  next();
+});
 app.use('/portal',express.urlencoded({extended:false,limit:'16kb'}));
 app.use('/interaction',express.urlencoded({extended:false,limit:'16kb'}));
 app.use(['/portal','/interaction'],express.json({limit:'64kb'}));
 app.use(express.static(new URL('../public/',import.meta.url).pathname,{fallthrough:true,maxAge:'1h'}));
 const secureCookie=issuerUrl.protocol==='https:';
 function html(res,contents,status=200){res.status(status).type('html').send(contents);}
+function jsonRequest(req){return Boolean(req.is('application/json')||req.get('accept')?.includes('application/json'));}
+function requestError(req,res,title,message,status){
+  if(jsonRequest(req))return res.status(status).json({error:message});
+  return html(res,errorPage(title,message,status),status);
+}
 function cookies(req){return Object.fromEntries((req.headers.cookie||'').split(';').map(x=>x.trim().split(/=(.*)/s).slice(0,2)).filter(x=>x[0]).map(([k,v])=>[k,decodeURIComponent(v||'')]));}
 function originGuard(req,res,next){
   const origin=req.get('origin');
@@ -64,7 +78,7 @@ function originGuard(req,res,next){
     try{trusted=new URL(req.get('referer')).origin===issuerUrl.origin;}catch{trusted=false;}
   }
   if(req.get('sec-fetch-site')==='cross-site')trusted=false;
-  if(!trusted){return html(res,errorPage('Request blocked','Please reopen the sign-in page from the HB ID website and try again.',403),403);}
+  if(!trusted)return requestError(req,res,'Request blocked','Please reopen HB ID from its sign-in page and try again.',403);
   next();
 }
 const limiter=new Map();
@@ -75,7 +89,7 @@ function rateLimit(req,res,next){
   let record=limiter.get(key);
   if(!record||now-record.since>900000){record={since:now,count:0};limiter.set(key,record);}
   record.count++;
-  if(record.count>8){return html(res,errorPage('Too many attempts','Try again later. For urgent access, contact the HB ID administrator.',429),429);}
+  if(record.count>8){res.set('Retry-After','900');return requestError(req,res,'Too many attempts','Too many attempts. Wait 15 minutes before trying again.',429);}
   req.rateLimitKey=key;next();
 }
 const clearRateLimit=req=>limiter.delete(req.rateLimitKey);
@@ -83,11 +97,11 @@ function setPortalCookie(res,token){res.cookie('hb_portal',token,{httpOnly:true,
 function clearPortalCookie(res){res.clearCookie('hb_portal',{httpOnly:true,secure:secureCookie,sameSite:'lax',path:'/'});}
 async function requirePortal(req,res,next){
   const user=await getDashboardSession(cookies(req).hb_portal);
-  if(!user)return res.redirect('/portal/login');
+  if(!user){if(jsonRequest(req))return res.status(401).json({error:'Your session expired. Please sign in again.',redirect:'/portal/login'});return res.redirect('/portal/login');}
   req.portalSession=user;next();
 }
-function requireAdmin(req,res,next){if(!req.portalSession?.is_admin)return html(res,errorPage('Admin access required','Only the platform administrator can manage applications and accounts.',403),403);next();}
-function csrfGuard(req,res,next){if(!req.portalSession||!req.body?._csrf||req.body._csrf!==req.portalSession.csrf)return html(res,errorPage('Security check failed','Please reopen the portal page and try again.',403),403);next();}
+function requireAdmin(req,res,next){if(!req.portalSession?.is_admin)return requestError(req,res,'Admin access required','Only the platform administrator can manage applications and accounts.',403);next();}
+function csrfGuard(req,res,next){if(!req.portalSession||!req.body?._csrf||req.body._csrf!==req.portalSession.csrf)return requestError(req,res,'Security check failed','Please reopen the portal page and try again.',403);next();}
 function validRedirect(input){
   try{
     const u=new URL(String(input||''));
@@ -111,12 +125,13 @@ async function renderPortal(req,res,{message='',error='',created=null,view}={}){
 }
 app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady}));
 app.get('/readyz', (_req,res)=>res.status(ownerReady?200:503).json({ready:ownerReady}));
-app.get('/', (_req,res)=>html(res,home()));
+app.get('/', (_req,res)=>html(res,home({issuer:ISSUER})));
 // Only the hosting account owner can seed an administrator through private env vars.
 // There is deliberately no public first-user enrollment route.
 app.use((_req,res,next)=>{
   if(ownerReady)return next();
   res.set('Cache-Control','no-store');
+  if(jsonRequest(_req))return res.status(503).json({error:'HB ID is temporarily unavailable. Please try again shortly.'});
   return html(res,setupPending(),503);
 });
 app.get('/portal/login', async(req,res)=>{
@@ -172,8 +187,13 @@ app.get('/wallet/login',async(req,res)=>{
 });
 app.get('/portal/wallet',requirePortal,async(req,res)=>{
   res.set('Cache-Control','no-store');
+  let connection=null;
+  if(process.env.WALLETWALLET_API_KEY){
+    try{connection={status:'connected',...await getWalletUsage({timeoutMs:5000})};}
+    catch(error){connection={status:error instanceof WalletServiceError?error.code:'provider_unavailable'};}
+  }
   html(res,walletPage({session:req.portalSession,pass:await getWalletPass(req.portalSession.id),
-    configured:Boolean(process.env.WALLETWALLET_API_KEY),message:req.query.result==='unavailable'?'Pass creation is unavailable right now. Please contact the platform owner.':''}));
+    configured:Boolean(process.env.WALLETWALLET_API_KEY),connection,message:req.query.result==='unavailable'?'Your card could not be created. Check the Wallet status below before trying again.':''}));
 });
 app.post('/portal/wallet/create',originGuard,requirePortal,csrfGuard,async(req,res)=>{
   res.set('Cache-Control','no-store');
@@ -257,9 +277,11 @@ app.post('/interaction/:uid/abort',originGuard,async(req,res)=>{
 });
 if(provider)app.use(provider.callback());
 app.use((err,req,res,next)=>{
-  console.error('HB ID request error:',err?.message||'Unknown error');
   if(res.headersSent)return next(err);
-  return html(res,errorPage('Request failed','Please retry. If the problem continues, contact the HB ID administrator.',500),500);
+  if(err?.type==='entity.parse.failed')return requestError(req,res,'Invalid request','This request could not be read. Refresh HB ID and try again.',400);
+  if(err?.type==='entity.too.large')return requestError(req,res,'Request too large','This request is too large. Please try again.',413);
+  console.error('HB ID request error:',/^[A-Z0-9_]{2,40}$/.test(err?.code||'')?err.code:'SERVER_ERROR');
+  return requestError(req,res,'Request failed','Please retry. If the problem continues, contact the HB ID administrator.',500);
 });
 // Serverless hosts import the app; traditional Node.js hosts use npm start.
 if (process.env.HB_ID_SERVERLESS !== 'true' && process.env.NETLIFY !== 'true' && !process.env.VERCEL) {

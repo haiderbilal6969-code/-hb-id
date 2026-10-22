@@ -14,12 +14,11 @@
     if(password.length<14||password.length>200||password!==confirm){status.textContent='Use matching passwords of 14–200 characters.';return;}
     const button=form.querySelector('button');button.disabled=true;
     try{
-      const response=await fetch(form.action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({token,password,confirm})});
-      const result=await response.json();
-      if(!response.ok){status.textContent=result.error||'Unable to reset the password. Please try again.';return;}
+      const response=await fetch(form.action,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams({token,password,confirm})});
+      await HBID.jsonResponse(response);
       token='';form.reset();form.hidden=true;login.hidden=false;status.classList.add('ok');
       status.textContent='Password saved. Sign in with your account email and new password.';
-    }catch{status.textContent='Connection interrupted. Try signing in with your new password first; if it did not save, reopen your recovery link.';}
+    }catch(error){status.textContent=error.name==='TypeError'?'Connection interrupted. Try signing in with your new password first; if it did not save, reopen your recovery link.':error.message;}
     finally{button.disabled=false;}
   });
 })();

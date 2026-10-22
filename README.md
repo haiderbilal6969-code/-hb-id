@@ -6,6 +6,8 @@ HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for 
 
 ## What works in the project
 
+- Public dark landing page with signup, passkeys, Wallet, connected websites, developer settings and account-recovery guidance.
+- Readable JSON API errors and safe browser handling of HTML/proxy errors. Hosted UI redirects to the configured issuer before sign-in.
 - Dark, mobile-friendly identity console with Overview, Security, Wallet, Connected apps, Profile, Websites and Members sections.
 - Real WebAuthn passkey registration and sign-in for the portal and OIDC interactions; current-password confirmation before enrollment, required device verification, persistent one-use challenges, and per-credential signature counters.
 - Per-user portal session listing and sign-out, profile editing, and OIDC grant disconnection.

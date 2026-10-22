@@ -29,15 +29,11 @@ function shareUrl(value) {
   catch {return null;}
 }
 export async function createWalletPass(user,{issuer,apiKey=process.env.WALLETWALLET_API_KEY,fetchImpl=fetch}={}) {
+  apiKey=typeof apiKey==='string'?apiKey.trim():'';
   if(!apiKey) throw new WalletServiceError('not_configured');
   const body=walletPassBody({name:user.name,issuer});
   const options={headers:{Authorization:`Bearer ${apiKey}`},redirect:'error',signal:AbortSignal.timeout(15000)};
-  let usage;
-  try {
-    const response=await fetchImpl(`${API}/api/auth/usage`,options);
-    if(!response.ok)throw new WalletServiceError(response.status===401?'provider_auth':'provider_unavailable');
-    usage=await response.json();
-  } catch(e) {if(e instanceof WalletServiceError)throw e;throw new WalletServiceError('provider_unavailable');}
+  const usage=await getWalletUsage({apiKey,fetchImpl});
   // Stop at the included quota. Never upgrade a plan or buy passes automatically.
   if(!Number.isFinite(usage.remaining) || usage.remaining<=0) throw new WalletServiceError('quota_reached');
   let response;
@@ -55,4 +51,17 @@ export async function createWalletPass(user,{issuer,apiKey=process.env.WALLETWAL
   const googleSaveUrl=googleUrl(result.googleSaveUrl);
   if(!googleSaveUrl || typeof result.serialNumber!=='string' || !/^[a-f0-9-]{36}$/i.test(result.serialNumber)) throw new WalletServiceError('creation_uncertain',true);
   return {serialNumber:result.serialNumber,googleSaveUrl,shareUrl:shareUrl(result.shareUrl)};
+}
+export async function getWalletUsage({apiKey=process.env.WALLETWALLET_API_KEY,fetchImpl=fetch,timeoutMs=10000}={}){
+  apiKey=typeof apiKey==='string'?apiKey.trim():'';
+  if(!apiKey)throw new WalletServiceError('not_configured');
+  try {
+    const response=await fetchImpl(`${API}/api/auth/usage`,{headers:{Authorization:`Bearer ${apiKey}`},redirect:'error',signal:AbortSignal.timeout(timeoutMs)});
+    if(!response.ok)throw new WalletServiceError(response.status===401?'provider_auth':'provider_unavailable');
+    const usage=await response.json();
+    return {remaining:Number.isFinite(usage?.remaining)?usage.remaining:null,
+      limit:Number.isFinite(usage?.limit)?usage.limit:null,
+      count:Number.isFinite(usage?.count)?usage.count:null,
+      plan:['free','trial','pro','business','enterprise'].includes(usage?.plan)?usage.plan:null};
+  } catch(e) {if(e instanceof WalletServiceError)throw e;throw new WalletServiceError('provider_unavailable');}
 }

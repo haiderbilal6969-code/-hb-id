@@ -17,12 +17,11 @@
     const button=form.querySelector('button');button.disabled=true;
     try{
       const response=await fetch(form.action,{method:'POST',credentials:'same-origin',
-        headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({token,name,password,confirm})});
-      const result=await response.json();
-      if(!response.ok){status.textContent=result.error||'Unable to create the account. Please try again.';return;}
+        headers:{'Content-Type':'application/x-www-form-urlencoded',Accept:'application/json'},body:new URLSearchParams({token,name,password,confirm})});
+      await HBID.jsonResponse(response);
       token='';form.reset();form.hidden=true;login.hidden=false;status.classList.add('ok');
       status.textContent='Your email is verified and your HB ID is ready. Sign in with your email and new password.';
-    }catch{status.textContent='Connection interrupted. Try signing in first; if your account was not created, reopen your email link.';}
+    }catch(error){status.textContent=error.name==='TypeError'?'Connection interrupted. Try signing in first; if your account was not created, reopen your email link.':error.message;}
     finally{button.disabled=false;}
   });
 })();

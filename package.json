@@ -8,9 +8,10 @@
   },
   "scripts": {
     "start": "node src/server.mjs",
-    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs && node --check netlify/functions/oidc.mjs && node --check src/wallet.mjs && node --check src/dashboard.mjs && node --check src/passkeys.mjs && node --check public/portal.js && node --check src/email.mjs && node --check src/enrollment.mjs && node --check public/verify-email.js",
+    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs && node --check netlify/functions/oidc.mjs && node --check src/wallet.mjs && node --check src/dashboard.mjs && node --check src/passkeys.mjs && node --check public/portal.js && node --check src/email.mjs && node --check src/enrollment.mjs && node --check public/verify-email.js && node --check public/api.js && node --check public/reset-password.js && node --check scripts/check-wallet.mjs",
     "test:integration": "node test/integration.mjs",
-    "test": "node --test test/wallet.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "check:wallet": "node scripts/check-wallet.mjs"
   },
   "dependencies": {
     "@simplewebauthn/browser": "14.0.0",

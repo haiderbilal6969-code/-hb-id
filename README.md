@@ -2,11 +2,16 @@
 
 HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for connecting websites under your own name. All login pages use the HB ID brand.
 
-> **Security status: early MVP / invite-only. Not independently security-audited.** Do not use for sensitive production accounts, patient information, healthcare systems, financial accounts or public signups. Before production you need verified email, password recovery, MFA/passkeys, account lockout policies, audit logging, monitoring, incident response, secure account management, penetration testing and high-availability hosting.
+> **Security status: early MVP / invite-only. Not independently security-audited.** Do not use for sensitive production accounts, patient information, healthcare systems, financial accounts or public signups. Before production you need verified email, audited recovery, enforced MFA, account lockout policies, audit logging, monitoring, incident response, secure account management, penetration testing and high-availability hosting.
 
 ## What works in the project
 
-- Branded responsive landing page, developer portal and login pages.
+- Dark, mobile-friendly identity console with Overview, Security, Wallet, Connected apps, Profile, Websites and Members sections.
+- Real WebAuthn passkey registration and sign-in for the portal and OIDC interactions; current-password confirmation before enrollment, required device verification, persistent one-use challenges, and per-credential signature counters.
+- Per-user portal session listing and sign-out, profile editing, and OIDC grant disconnection.
+- Owner-only developer and member directories; members see only their own identity data.
+- OIDC website registration with copyable client settings, exact callbacks, and one-time secret display.
+- Owner-issued, single-use password recovery links revoke existing sessions.
 - Users stored in PostgreSQL; passwords hashed and salted with Node.js scrypt.
 - Administrator account bootstrapped once from secure environment variables.
 - Admin-created member accounts (invite-only).
@@ -69,7 +74,7 @@ Do not embed client secrets inside public HTML, JavaScript, mobile binaries or a
 - The password limiter is an **instance-local basic control only**, not a substitute for distributed rate limiting and bot protection. Deploy a managed edge/WAF and implement proper audit alerts before inviting external customers.
 - Account email verification is intentionally **not implemented** and unverified addresses are **not released to OIDC clients**. Admin provisioned users can still sign in and receive stable `sub` and profile `name` claims.
 - Do not advertise HB ID as formally OpenID Certified; it uses a certified library, but your deployment is not itself certified.
-- Client management is owner/admin-only. Self-service third-party developer signup, email workflows, MFA, password reset and revocation dashboards require more work.
+- Client management is owner/admin-only. Self-service third-party developer signup, email verification workflows, enforced MFA and self-service email recovery require more work. Optional passkeys are a sign-in alternative, not enforced two-factor authentication.
 - Any failure of the database will prevent logins; back up the database and design for HA before production.
 - RSA keys and cookie secrets currently reside in Postgres; production deployments should use managed secret storage/KMS, encryption at rest, and key rotation.
 
@@ -80,6 +85,9 @@ HB-ID/
   src/db.mjs            # PostgreSQL schema, sessions, password hashing, OIDC adapter
   src/server.mjs        # API, login, consent, admin and OIDC routes
   src/ui.mjs            # Accessible branded HTML server-rendered views
+  src/dashboard.mjs     # Account, security, developer and member views
+  src/passkeys.mjs      # WebAuthn registration and authentication routes
+  public/portal.js      # Passkey ceremonies and copy controls
   public/style.css      # Mobile-first dark identity UI
   example-client/       # Separate website sign-in example
   .env.example          # Environment variable names only; NO real secrets

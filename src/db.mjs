@@ -53,6 +53,21 @@ export async function initDatabase() {
       token_hash CHAR(64) PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       csrf TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL
     )`);
+    await query('ALTER TABLE dashboard_sessions ADD COLUMN IF NOT EXISTS session_id UUID NOT NULL DEFAULT gen_random_uuid()');
+    await query('ALTER TABLE dashboard_sessions ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()');
+    await query("ALTER TABLE dashboard_sessions ADD COLUMN IF NOT EXISTS user_agent VARCHAR(256) NOT NULL DEFAULT ''");
+    await query(`CREATE TABLE IF NOT EXISTS passkeys (
+      id TEXT PRIMARY KEY, user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name VARCHAR(60) NOT NULL, public_key BYTEA NOT NULL, counter BIGINT NOT NULL,
+      transports JSONB NOT NULL DEFAULT '[]', device_type TEXT NOT NULL, backed_up BOOLEAN NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_used_at TIMESTAMPTZ
+    )`);
+    await query('CREATE INDEX IF NOT EXISTS passkeys_user_idx ON passkeys (user_id)');
+    await query(`CREATE TABLE IF NOT EXISTS passkey_challenges (
+      token_hash CHAR(64) PRIMARY KEY, purpose TEXT NOT NULL, payload JSONB NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL
+    )`);
+    await query('DELETE FROM passkey_challenges WHERE expires_at < NOW()');
     await query(`CREATE TABLE IF NOT EXISTS system_config (
       name TEXT PRIMARY KEY, value JSONB NOT NULL
     )`);
@@ -138,9 +153,9 @@ export async function listUsers(){
   const r=await query('SELECT id,name,email,is_admin,created_at FROM users ORDER BY created_at DESC LIMIT 100');
   return r.rows;
 }
-export async function createDashboardSession(userId){
+export async function createDashboardSession(userId,userAgent=''){
   const token=rand(32); const csrf=rand(24);
-  await query("INSERT INTO dashboard_sessions (token_hash,user_id,csrf,expires_at) VALUES ($1,$2,$3,NOW()+interval '12 hours')",[digest(token),userId,csrf]);
+  await query("INSERT INTO dashboard_sessions (token_hash,user_id,csrf,expires_at,user_agent) VALUES ($1,$2,$3,NOW()+interval '12 hours',$4)",[digest(token),userId,csrf,String(userAgent).slice(0,256)]);
   return token;
 }
 export async function getDashboardSession(token){
@@ -151,7 +166,7 @@ export async function getDashboardSession(token){
 }
 export async function deleteDashboardSession(token){ if(token) await query('DELETE FROM dashboard_sessions WHERE token_hash=$1',[digest(token)]); }
 export async function getWalletPass(userId){
-  const r=await query('SELECT status,google_save_url FROM wallet_passes WHERE user_id=$1',[userId]);
+  const r=await query('SELECT status,google_save_url,share_url,updated_at FROM wallet_passes WHERE user_id=$1',[userId]);
   return r.rows[0]||null;
 }
 export async function claimWalletPass(userId){
@@ -180,6 +195,53 @@ export async function createClient(name,redirectUri){
 export async function listClients(){
   const r=await query("SELECT id,payload->>'client_name' AS name,payload->'redirect_uris' AS redirect_uris FROM oidc_objects WHERE model='Client' ORDER BY id LIMIT 100");
   return r.rows;
+}
+export async function listPortalSessions(userId,currentToken){
+  return (await query(`SELECT session_id,created_at,expires_at,user_agent,token_hash=$2 AS is_current
+    FROM dashboard_sessions WHERE user_id=$1 AND expires_at>NOW() ORDER BY created_at DESC LIMIT 50`,[userId,digest(currentToken||'')])).rows;
+}
+export async function revokePortalSession(userId,sessionId){
+  if(!/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(String(sessionId)))return false;
+  return (await query('DELETE FROM dashboard_sessions WHERE user_id=$1 AND session_id=$2',[userId,sessionId])).rowCount>0;
+}
+export async function updateProfile(userId,name){await query('UPDATE users SET name=$2 WHERE id=$1',[userId,name]);}
+export async function listAuthorizedApps(userId){
+  return (await query(`SELECT g.payload->>'clientId' AS id,COALESCE(c.payload->>'client_name','Connected website') AS name,
+    COUNT(*)::int AS grants FROM oidc_objects g LEFT JOIN oidc_objects c
+    ON c.model='Client' AND c.id=g.payload->>'clientId'
+    WHERE g.model='Grant' AND g.payload->>'accountId'=$1 AND (g.expires_at IS NULL OR g.expires_at>NOW())
+    GROUP BY g.payload->>'clientId',c.payload->>'client_name'`,[String(userId)])).rows;
+}
+export async function revokeAuthorizedApp(userId,clientId){
+  await query(`WITH owned AS (SELECT id FROM oidc_objects WHERE model='Grant' AND payload->>'accountId'=$1 AND payload->>'clientId'=$2)
+    DELETE FROM oidc_objects WHERE model<>'Client' AND (grant_id IN (SELECT id FROM owned) OR (model='Grant' AND id IN (SELECT id FROM owned)))`,[String(userId),clientId]);
+}
+export async function listPasskeys(userId){
+  return (await query('SELECT id,name,transports,device_type,backed_up,created_at,last_used_at FROM passkeys WHERE user_id=$1 ORDER BY created_at',[userId])).rows;
+}
+export async function savePasskey(userId,name,info){
+  const c=info.credential;
+  await query(`INSERT INTO passkeys(id,user_id,name,public_key,counter,transports,device_type,backed_up)
+    VALUES($1,$2,$3,$4,$5,$6::jsonb,$7,$8)`,[c.id,userId,name,Buffer.from(c.publicKey),c.counter,JSON.stringify(c.transports||[]),info.credentialDeviceType,info.credentialBackedUp]);
+}
+export async function findPasskey(id){
+  if(typeof id!=='string'||id.length>2048)return null;
+  return (await query('SELECT * FROM passkeys WHERE id=$1',[id])).rows[0]||null;
+}
+export async function updatePasskeyCounter(id,oldCounter,info){
+  return (await query('UPDATE passkeys SET counter=$3,backed_up=$4,last_used_at=NOW() WHERE id=$1 AND counter=$2',
+    [id,oldCounter,info.newCounter,info.credentialBackedUp])).rowCount===1;
+}
+export async function removePasskey(userId,id){await query('DELETE FROM passkeys WHERE user_id=$1 AND id=$2',[userId,id]);}
+export async function createPasskeyChallenge(purpose,payload){
+  const token=rand();
+  await query('DELETE FROM passkey_challenges WHERE expires_at<NOW()');
+  await query("INSERT INTO passkey_challenges(token_hash,purpose,payload,expires_at) VALUES($1,$2,$3::jsonb,NOW()+interval '5 minutes')",[digest(token),purpose,JSON.stringify(payload)]);
+  return token;
+}
+export async function consumePasskeyChallenge(token,purpose){
+  if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token))return null;
+  return (await query('DELETE FROM passkey_challenges WHERE token_hash=$1 AND purpose=$2 AND expires_at>NOW() RETURNING payload',[digest(token),purpose])).rows[0]?.payload||null;
 }
 export class PostgresOidcAdapter {
   constructor(model){this.model=model;}

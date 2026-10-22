@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto';
 import { once } from 'node:events';
+import {testAuthenticator} from './authenticator.mjs';
 
 const input = process.env.HB_ID_TEST_DATABASE_URL ? null : await new Promise(resolve => {
   let value = '';
@@ -29,14 +30,15 @@ const issuer = `http://127.0.0.1:${server.address().port}`;
 process.env.ISSUER = issuer;
 const jar = new Map();
 let db;
-async function request(path, { method='GET', form, headers={}, browser=true }={}) {
+async function request(path, { method='GET', form, json, headers={}, browser=true }={}) {
   const url = new URL(path, issuer);
   if (browser) headers.Cookie = [...jar.values()].filter(c => url.pathname.startsWith(c.path)).map(c => c.pair).join('; ');
   if (form) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
     if(browser) headers.Origin = issuer;
   }
-  const response = await fetch(url, { method, headers, body:form?new URLSearchParams(form):undefined, redirect:'manual' });
+  if(json){headers['Content-Type']='application/json';if(browser)headers.Origin=issuer;}
+  const response = await fetch(url, { method, headers, body:json?JSON.stringify(json):form?new URLSearchParams(form):undefined, redirect:'manual' });
   if (browser) for (const line of response.headers.getSetCookie()) {
     const [pair,...attrs] = line.split(';').map(s => s.trim());
     const name = pair.slice(0, pair.indexOf('='));
@@ -96,7 +98,7 @@ try {
   }
   const portal = await request('/portal');
   assert.equal(portal.status,200);
-  const csrf=portal.text.match(/name="_csrf" value="([^"]+)"/)?.[1];
+  let csrf=portal.text.match(/name="_csrf" value="([^"]+)"/)?.[1];
   assert.ok(csrf,'Portal supplies a CSRF token');
   assert.equal((await request('/portal/apps',{method:'POST',form:{name:'Test site',redirect_uri:'http://localhost:4000/callback'}})).status,403);
   const registration=await request('/portal/apps',{method:'POST',form:{_csrf:csrf,name:'Test site',redirect_uri:'http://localhost:4000/callback'}});
@@ -104,6 +106,9 @@ try {
   const client=(await db.query("SELECT payload FROM oidc_objects WHERE model='Client'")).rows[0].payload;
   assert.ok(client.client_secret,'Confidential client registered');
   console.log('PASS: owner bootstrap is idempotent; origin checks, CSRF and client registration');
+  for(const path of ['/portal/security','/portal/apps','/portal/members','/portal/connections','/portal/profile']){
+    const page=await request(path);assert.equal(page.status,200);assert.equal(page.headers.get('cache-control'),'no-store');
+  }
 
   const walletEntry=await request('/wallet/login');
   assert.equal(walletEntry.status,303);
@@ -112,7 +117,7 @@ try {
   assert.equal(copiedEntry.headers.get('location'),'/portal/login');
   const wallet=await request('/portal/wallet');
   assert.equal(wallet.status,200);
-  assert.ok(wallet.text.includes('finish setup'));
+  assert.ok(wallet.text.includes('Card issuance needs setup'));
   assert.equal((await request('/portal/wallet/create',{method:'POST',form:{}})).status,403);
   const unconfigured=await request('/portal/wallet/create',{method:'POST',form:{_csrf:csrf}});
   assert.equal(unconfigured.headers.get('location'),'/portal/wallet?result=unavailable');
@@ -130,6 +135,45 @@ try {
   assert.equal(await db.claimWalletPass(member.id),false);
   assert.equal((await db.getWalletPass(member.id)).google_save_url,null);
   console.log('PASS: Wallet shortcut requires a session; pass creation needs CSRF; saved and uncertain requests cannot issue duplicates');
+
+  const authenticator=testAuthenticator(issuer);
+  const registrationBody={_csrf:csrf,name:'My test phone',password};
+  assert.equal((await request('/portal/passkeys/register/options',{method:'POST',json:{...registrationBody,_csrf:'wrong'}})).status,403);
+  assert.equal((await request('/portal/passkeys/register/options',{method:'POST',json:{...registrationBody,password:'incorrect-test-password'}})).status,401);
+  let options=JSON.parse((await request('/portal/passkeys/register/options',{method:'POST',json:registrationBody})).text);
+  assert.equal(options.authenticatorSelection.userVerification,'required');
+  assert.equal(options.authenticatorSelection.residentKey,'required');
+  assert.equal((await request('/portal/passkeys/register/verify',{method:'POST',json:{_csrf:csrf,credential:authenticator.register(options,{wrongOrigin:true})}})).status,400);
+  assert.equal((await db.listPasskeys(owner.id)).length,0);
+  options=JSON.parse((await request('/portal/passkeys/register/options',{method:'POST',json:registrationBody})).text);
+  const registrationCredential=authenticator.register(options);
+  assert.equal((await request('/portal/passkeys/register/verify',{method:'POST',json:{_csrf:csrf,credential:registrationCredential}})).status,200);
+  assert.equal((await request('/portal/passkeys/register/verify',{method:'POST',json:{_csrf:csrf,credential:registrationCredential}})).status,400,'Registration challenge cannot be replayed');
+  assert.equal((await db.listPasskeys(owner.id)).length,1);
+  for(const attack of [{badSignature:true},{wrongOrigin:true},{unverified:true}]){
+    options=JSON.parse((await request('/portal/passkeys/login/options',{method:'POST',json:{}})).text);
+    assert.equal((await request('/portal/passkeys/login/verify',{method:'POST',json:{credential:authenticator.authenticate(options,attack)}})).status,400);
+  }
+  options=JSON.parse((await request('/portal/passkeys/login/options',{method:'POST',json:{}})).text);
+  const signedCredential=authenticator.authenticate(options);
+  assert.equal((await request('/portal/passkeys/login/verify',{method:'POST',json:{credential:signedCredential}})).status,200);
+  assert.equal((await request('/portal/passkeys/login/verify',{method:'POST',json:{credential:signedCredential}})).status,400,'Authentication challenge cannot be replayed');
+  options=JSON.parse((await request('/portal/passkeys/login/options',{method:'POST',json:{}})).text);
+  assert.equal((await request('/portal/passkeys/login/verify',{method:'POST',json:{credential:authenticator.authenticate(options,{counter:1})}})).status,400,'Non-increasing credential counters are rejected');
+  csrf=(await request('/portal')).text.match(/name="_csrf" value="([^"]+)"/)?.[1];
+  assert.ok(csrf);
+  const memberToken=await db.createDashboardSession(member.id,'Firefox/100 Android');
+  const memberHeaders={Cookie:`hb_portal=${memberToken}`,Origin:issuer};
+  const memberSecurity=await request('/portal/security',{browser:false,headers:{...memberHeaders}});
+  assert.equal(memberSecurity.status,200);assert.ok(!memberSecurity.text.includes('My test phone'));
+  const memberCsrf=memberSecurity.text.match(/name="_csrf" value="([^"]+)"/)?.[1];
+  assert.equal((await request('/portal/members',{browser:false,headers:{...memberHeaders}})).status,403);
+  assert.equal((await request('/portal/apps',{method:'POST',form:{_csrf:memberCsrf,name:'Unapproved website',redirect_uri:'https://untrusted.example/callback'},browser:false,headers:{...memberHeaders}})).status,403);
+  assert.ok(!(await request('/portal',{browser:false,headers:{...memberHeaders}})).text.includes('owner@example.invalid'),'Member overview does not expose the directory');
+  const ownerSession=(await db.listPortalSessions(owner.id,'')).find(s=>!s.is_current);
+  await request('/portal/sessions/revoke',{method:'POST',form:{_csrf:memberCsrf,session_id:ownerSession.session_id},browser:false,headers:{...memberHeaders}});
+  assert.equal((await request('/portal')).status,200,'A member cannot revoke another account’s session');
+  console.log('PASS: real signed passkey registration/login; bad signatures, origins, UV, counters and challenge replay rejected; member data isolated');
 
   const verifier=randomBytes(32).toString('base64url');
   const state=randomBytes(16).toString('base64url');
@@ -174,6 +218,17 @@ try {
   assert.equal(userinfo.email,undefined); assert.equal(userinfo.email_verified,false);
   console.log('PASS: Authorization Code + PKCE, consent, signed ID token and UserInfo');
 
+  result=await follow(await request(`${discovery.authorization_endpoint}?${new URLSearchParams({...params,prompt:'login',state:randomBytes(16).toString('base64url')})}`));
+  const passkeyBase=result.text.match(/data-base="(\/interaction\/[^\"]+\/passkeys)"/)?.[1];
+  assert.ok(passkeyBase,'OIDC sign-in offers passkeys');
+  options=JSON.parse((await request(passkeyBase+'/options',{method:'POST',json:{}})).text);
+  const passkeyResult=await request(passkeyBase+'/verify',{method:'POST',json:{credential:authenticator.authenticate(options,{counter:2})}});
+  assert.equal(passkeyResult.status,200);
+  result=await follow(await request(JSON.parse(passkeyResult.text).redirect));
+  assert.ok(result.callback?.searchParams.get('code'),'Passkey login completes the OIDC redirect flow');
+  assert.ok((await db.listAuthorizedApps(owner.id)).some(a=>a.id===client.client_id));
+  console.log('PASS: passkey sign-in works inside an OIDC website interaction');
+
   const newAuthorization=()=>request(`${discovery.authorization_endpoint}?${new URLSearchParams({...params,state:randomBytes(16).toString('base64url')})}`);
   result=await follow(await newAuthorization());
   assert.ok(result.callback?.searchParams.get('code'),'Existing identity session supports SSO');
@@ -188,6 +243,24 @@ try {
   const replay=await request(discovery.token_endpoint,{method:'POST',form:tokenForm,headers:basic,browser:false});
   assert.equal(replay.status,400); assert.equal(JSON.parse(replay.text).error,'invalid_grant');
   console.log('PASS: wrong PKCE and authorization code replay rejected');
+  assert.equal((await request('/portal/profile',{method:'POST',form:{_csrf:csrf,name:'Updated owner'}})).status,303);
+  assert.ok((await request('/portal/profile')).text.includes('Updated owner'));
+  const otherToken=await db.createDashboardSession(owner.id,'Chrome/130 Android');
+  const otherSession=(await db.listPortalSessions(owner.id,otherToken)).find(s=>s.is_current);
+  assert.equal((await request('/portal/sessions/revoke',{method:'POST',form:{_csrf:csrf,session_id:otherSession.session_id}})).status,303);
+  assert.equal(await db.getDashboardSession(otherToken),null);
+  const ownerGrantId='test-owner-revoke',memberGrantId='test-member-keep';
+  await new db.PostgresOidcAdapter('Grant').upsert(ownerGrantId,{accountId:String(owner.id),clientId:client.client_id},300);
+  await new db.PostgresOidcAdapter('Grant').upsert(memberGrantId,{accountId:String(member.id),clientId:client.client_id},300);
+  await new db.PostgresOidcAdapter('AccessToken').upsert('test-revoked-access',{grantId:ownerGrantId,accountId:String(owner.id)},300);
+  assert.equal((await db.listAuthorizedApps(owner.id)).length,1);
+  await request('/portal/connections/revoke',{method:'POST',form:{_csrf:csrf,client_id:client.client_id}});
+  assert.equal((await db.listAuthorizedApps(owner.id)).length,0);
+  assert.equal((await db.listAuthorizedApps(member.id)).length,1,'Disconnect affects only the signed-in member');
+  assert.equal(await new db.PostgresOidcAdapter('AccessToken').find('test-revoked-access'),undefined);
+  assert.equal((await request('/portal/passkeys/remove',{method:'POST',form:{_csrf:csrf,id:authenticator.id,password}})).status,303);
+  assert.equal((await db.listPasskeys(owner.id)).length,0);
+  console.log('PASS: profile updates, session sign-out, connection revocation and passkey removal persist');
   console.log('HB ID integration checks passed.');
 } catch(error) {
   console.error(`HB ID integration failed: ${error.message}`);

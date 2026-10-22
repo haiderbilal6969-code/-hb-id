@@ -3,8 +3,11 @@ import helmet from 'helmet';
 import { Provider } from 'oidc-provider';
 import { initDatabase, getOrMakeKeys, PostgresOidcAdapter, findByEmail, findById, verifyPassword,
   createClient, listClients, listUsers, createUser, createDashboardSession, getDashboardSession,
-  deleteDashboardSession, getWalletPass, claimWalletPass, completeWalletPass, failWalletPass } from './db.mjs';
-import { home, portal, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending, walletPage } from './ui.mjs';
+  deleteDashboardSession, getWalletPass, claimWalletPass, completeWalletPass, failWalletPass,
+  listPasskeys,listPortalSessions,revokePortalSession,updateProfile,listAuthorizedApps,revokeAuthorizedApp } from './db.mjs';
+import { home, portalLogin, interactionLogin, interactionConsent, errorPage, setupPending, walletPage } from './ui.mjs';
+import {portal} from './dashboard.mjs';
+import {installPasskeyRoutes} from './passkeys.mjs';
 import { createWalletPass, WalletServiceError } from './wallet.mjs';
 import { resetPasswordWithToken } from './db.mjs';
 import { passwordReset } from './ui.mjs';
@@ -45,6 +48,7 @@ app.use(helmet({referrerPolicy:{policy:'same-origin'},contentSecurityPolicy:{dir
 app.use(['/portal','/interaction'],(_req,res,next)=>{res.set('Cache-Control','no-store');next();});
 app.use('/portal',express.urlencoded({extended:false,limit:'16kb'}));
 app.use('/interaction',express.urlencoded({extended:false,limit:'16kb'}));
+app.use(['/portal','/interaction'],express.json({limit:'64kb'}));
 app.use(express.static(new URL('../public/',import.meta.url).pathname,{fallthrough:true,maxAge:'1h'}));
 const secureCookie=issuerUrl.protocol==='https:';
 function html(res,contents,status=200){res.status(status).type('html').send(contents);}
@@ -90,10 +94,18 @@ function validRedirect(input){
     return u.protocol==='http:' && ['localhost','127.0.0.1'].includes(u.hostname);
   }catch{return false;}
 }
-async function renderPortal(req,res,{message='',error='',created=null}={}){
-  const [apps,users]=await Promise.all([listClients(),listUsers()]);
+async function renderPortal(req,res,{message='',error='',created=null,view}={}){
+  const session=req.portalSession;
+  const [apps,users,passkeys,sessions,connections,pass]=await Promise.all([
+    session.is_admin?listClients():[],session.is_admin?listUsers():[],listPasskeys(session.id),
+    listPortalSessions(session.id,cookies(req).hb_portal),listAuthorizedApps(session.id),getWalletPass(session.id)]);
+  const results={'profile-saved':'Your profile has been saved.','session-revoked':'That portal session has been signed out.',
+    'app-disconnected':'Website permission removed. It will need your consent again.','passkey-added':'Your passkey is ready. Use it next time you sign in.',
+    'passkey-removed':'Passkey removed from HB ID.'};
+  const selected=view||req.path.split('/')[2]||'overview';
   res.set('Cache-Control','no-store');
-  html(res,portal({session:req.portalSession,apps,users,created,issuer:ISSUER,message,error}));
+  html(res,portal({session,apps,users,passkeys,sessions,connections,pass,created,issuer:ISSUER,view:selected,
+    message:message||results[req.query.result]||'',error:error||(req.query.result==='password-incorrect'?'Your current password is incorrect.':'')}));
 }
 app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady}));
 app.get('/readyz', (_req,res)=>res.status(ownerReady?200:503).json({ready:ownerReady}));
@@ -125,10 +137,30 @@ app.post('/portal/login',originGuard,rateLimit,async(req,res)=>{
   const valid=account && await verifyPassword(String(req.body.password||''),account.password_hash);
   if(!valid)return html(res,portalLogin('Invalid email or password.'),401);
   clearRateLimit(req);
-  setPortalCookie(res,await createDashboardSession(account.id));
+  await finishPortalLogin(req,res,account.id);
   res.redirect(303,'/portal');
 });
+async function finishPortalLogin(req,res,userId){
+  await deleteDashboardSession(cookies(req).hb_portal);
+  setPortalCookie(res,await createDashboardSession(userId,req.get('user-agent')||''));
+}
+installPasskeyRoutes(app,{issuerUrl,originGuard,requirePortal,csrfGuard,rateLimit,clearRateLimit,cookies,provider,finishPortalLogin});
 app.get('/portal',requirePortal,async(req,res)=>renderPortal(req,res));
+app.get(['/portal/apps','/portal/members'],requirePortal,requireAdmin,async(req,res)=>renderPortal(req,res));
+app.get(['/portal/security','/portal/profile','/portal/connections'],requirePortal,async(req,res)=>renderPortal(req,res));
+app.post('/portal/profile',originGuard,requirePortal,csrfGuard,async(req,res)=>{
+  const name=String(req.body.name||'').trim();
+  if(name.length<2||name.length>100)return renderPortal(req,res,{view:'profile',error:'Enter a display name of 2–100 characters.'});
+  await updateProfile(req.portalSession.id,name);res.redirect(303,'/portal/profile?result=profile-saved');
+});
+app.post('/portal/sessions/revoke',originGuard,requirePortal,csrfGuard,async(req,res)=>{
+  await revokePortalSession(req.portalSession.id,String(req.body.session_id||''));
+  res.redirect(303,'/portal/security?result=session-revoked');
+});
+app.post('/portal/connections/revoke',originGuard,requirePortal,csrfGuard,async(req,res)=>{
+  await revokeAuthorizedApp(req.portalSession.id,String(req.body.client_id||''));
+  res.redirect(303,'/portal/connections?result=app-disconnected');
+});
 app.get('/wallet/login',async(req,res)=>{
   res.set('Cache-Control','no-store');
   // The QR has no account identifier or login token. Only the browser session counts.
@@ -162,20 +194,20 @@ app.post('/portal/logout',originGuard,requirePortal,csrfGuard,async(req,res)=>{
 app.post('/portal/apps',originGuard,requirePortal,requireAdmin,csrfGuard,async(req,res)=>{
   const name=String(req.body.name||'').trim();
   const redirect=String(req.body.redirect_uri||'').trim();
-  if(name.length<2||name.length>90)return renderPortal(req,res,{error:'Application name must be 2–90 characters.'});
-  if(!validRedirect(redirect))return renderPortal(req,res,{error:'Use a valid HTTPS callback URL. Only localhost may use HTTP for testing.'});
+  if(name.length<2||name.length>90)return renderPortal(req,res,{view:'apps',error:'Application name must be 2–90 characters.'});
+  if(!validRedirect(redirect))return renderPortal(req,res,{view:'apps',error:'Use a valid HTTPS callback URL. Only localhost may use HTTP for testing.'});
   const created=await createClient(name,redirect);
-  return renderPortal(req,res,{created,message:`${name} has been registered. Copy the client secret now.`});
+  return renderPortal(req,res,{view:'apps',created,message:`${name} has been registered. Copy the client secret now.`});
 });
 app.post('/portal/users',originGuard,requirePortal,requireAdmin,csrfGuard,async(req,res)=>{
   const name=String(req.body.name||'').trim();
   const email=String(req.body.email||'').trim().toLowerCase();
   const password=String(req.body.password||'');
   if(name.length<2||name.length>100||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<14||password.length>200){
-    return renderPortal(req,res,{error:'Enter a valid name, email and unique password of 14–200 characters.'});
+    return renderPortal(req,res,{view:'members',error:'Enter a valid name, email and unique password of 14–200 characters.'});
   }
-  try{await createUser(name,email,password);return renderPortal(req,res,{message:`Account created for ${name}. Give the temporary password to that person privately.`});}
-  catch(e){if(e.code==='23505')return renderPortal(req,res,{error:'An account already exists for that email.'});throw e;}
+  try{await createUser(name,email,password);return renderPortal(req,res,{view:'members',message:`Account created for ${name}. Give the temporary password to that person privately.`});}
+  catch(e){if(e.code==='23505')return renderPortal(req,res,{view:'members',error:'An account already exists for that email.'});throw e;}
 });
 // oidc-provider uses signed cookies to bind the interaction to its authorization request.
 app.get('/interaction/:uid',async(req,res)=>{

@@ -8,11 +8,13 @@
   },
   "scripts": {
     "start": "node src/server.mjs",
-    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs && node --check netlify/functions/oidc.mjs && node --check src/wallet.mjs",
+    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs && node --check netlify/functions/oidc.mjs && node --check src/wallet.mjs && node --check src/dashboard.mjs && node --check src/passkeys.mjs && node --check public/portal.js",
     "test:integration": "node test/integration.mjs",
     "test": "node --test test/wallet.test.mjs"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "14.0.0",
+    "@simplewebauthn/server": "14.0.3",
     "@vercel/functions": "^3.10.2",
     "express": "^5.1.0",
     "helmet": "^8.1.0",

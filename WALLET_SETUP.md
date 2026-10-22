@@ -8,7 +8,7 @@ user's save confirmation on their phone. The app cannot silently install a card.
 The pass QR and back-of-pass link open `https://hb-id.vercel.app/wallet/login`.
 That route reuses an existing valid HB ID browser session. A signed-out browser
 must sign in normally. A copied pass or its URL cannot authenticate a user. This
-feature does not implement passkeys, NFC authentication, or Google identity login.
+card does not implement NFC authentication or Google identity login. Passkeys are managed separately under Security and can verify sign-in after opening HB ID.
 Connected websites continue to use the existing OIDC flow.
 
 ## Enable automatic pass creation from HB ID

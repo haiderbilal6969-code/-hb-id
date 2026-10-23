@@ -57,6 +57,13 @@ export async function initDatabase() {
       email_verified BOOLEAN NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`);
+    await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS supabase_user_id UUID UNIQUE');
+    await query('ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_version INTEGER NOT NULL DEFAULT 0');
+    await query(`CREATE TABLE IF NOT EXISTS email_auth_challenges (
+      token_hash CHAR(64) PRIMARY KEY, stage TEXT NOT NULL, payload JSONB NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0, expires_at TIMESTAMPTZ NOT NULL
+    )`);
+    await query('DELETE FROM email_auth_challenges WHERE expires_at<NOW()');
     await query(`CREATE TABLE IF NOT EXISTS oidc_objects (
       model TEXT NOT NULL, id TEXT NOT NULL, payload JSONB NOT NULL,
       expires_at TIMESTAMPTZ, grant_id TEXT, uid TEXT, user_code TEXT,
@@ -168,7 +175,8 @@ export async function resetPasswordWithToken(token,password){
       WHERE token_hash=$1 AND used_at IS NULL AND expires_at>NOW() FOR UPDATE`,[digest(token)]);
     if(!found.rowCount){await client.query('ROLLBACK');return false;}
     const userId=found.rows[0].user_id;
-    await client.query('UPDATE users SET password_hash=$2,email_verified=email_verified OR $3 WHERE id=$1',[userId,await hashPassword(password),found.rows[0].verifies_email]);
+    await client.query('UPDATE users SET password_hash=$2,email_verified=email_verified OR $3,supabase_user_id=NULL,auth_version=auth_version+1 WHERE id=$1',[userId,await hashPassword(password),found.rows[0].verifies_email]);
+    await client.query("DELETE FROM email_auth_challenges WHERE payload->>'userId'=$1",[String(userId)]);
     await client.query('UPDATE password_reset_tokens SET used_at=NOW() WHERE user_id=$1 AND used_at IS NULL',[userId]);
     await client.query('DELETE FROM dashboard_sessions WHERE user_id=$1',[userId]);
     await client.query('DELETE FROM passkeys WHERE user_id=$1',[userId]);
@@ -192,13 +200,14 @@ export async function listUsers(){
   const r=await query('SELECT id,name,email,is_admin,created_at FROM users ORDER BY created_at DESC LIMIT 100');
   return r.rows;
 }
-export async function createDashboardSession(userId,userAgent='',{passwordHash=null,passkeyId=null}={}){
+export async function createDashboardSession(userId,userAgent='',{passwordHash=null,passkeyId=null,supabaseUserId=null,authVersion=null}={}){
   const token=rand(32); const csrf=rand(24);
   const client=await pool.connect();
   try{
     await client.query('BEGIN');
-    const account=(await client.query('SELECT password_hash FROM users WHERE id=$1 FOR UPDATE',[userId])).rows[0];
+    const account=(await client.query('SELECT password_hash,supabase_user_id,auth_version FROM users WHERE id=$1 FOR UPDATE',[userId])).rows[0];
     if(!account||(passwordHash&&account.password_hash!==passwordHash)||
+      (supabaseUserId&&(account.supabase_user_id!==supabaseUserId||account.auth_version!==authVersion))||
       (passkeyId&&!(await client.query('SELECT id FROM passkeys WHERE id=$1 AND user_id=$2',[passkeyId,userId])).rowCount)){
       await client.query('ROLLBACK');return null;
     }
@@ -211,7 +220,7 @@ export async function getDashboardSession(token){
   const r=await query(`UPDATE dashboard_sessions s SET last_seen_at=NOW() FROM users u
     WHERE u.id=s.user_id AND s.token_hash=$1 AND s.expires_at>NOW()
       AND s.last_seen_at>NOW()-interval '30 minutes'
-    RETURNING s.*,u.name,u.email,u.is_admin,u.id`,[digest(token)]);
+    RETURNING s.*,u.name,u.email,u.is_admin,u.id,(u.supabase_user_id IS NOT NULL) AS email_code_linked`,[digest(token)]);
   return r.rows[0]||null;
 }
 export async function deleteDashboardSession(token){ if(token) await query('DELETE FROM dashboard_sessions WHERE token_hash=$1',[digest(token)]); }
@@ -257,7 +266,7 @@ export async function consumeAuthLimit(key,max=8){
   return result.rows[0].count<=max;
 }
 export async function clearAuthLimit(key){if(key)await query('DELETE FROM auth_rate_limits WHERE key=$1',[key]);}
-const eventActions=new Set(['password_sign_in','passkey_sign_in','sign_in_failed','password_reset','passkey_added','passkey_removed','website_created','member_created','owner_check_failed']);
+const eventActions=new Set(['password_sign_in','passkey_sign_in','email_code_sign_in','email_code_linked','email_code_removed','sign_in_failed','password_reset','passkey_added','passkey_removed','website_created','member_created','owner_check_failed']);
 export async function recordSecurityEvent(userId,action){
   if(!eventActions.has(action))throw new Error('Unknown security event');
   await query("DELETE FROM security_events WHERE created_at<NOW()-interval '30 days'");

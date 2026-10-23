@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node src/server.mjs",
-    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs && node --check netlify/functions/oidc.mjs && node --check src/wallet.mjs && node --check src/dashboard.mjs && node --check src/passkeys.mjs && node --check public/portal.js && node --check src/email.mjs && node --check src/enrollment.mjs && node --check public/verify-email.js && node --check public/api.js && node --check public/reset-password.js && node --check scripts/check-wallet.mjs",
+    "check": "node --check src/server.mjs && node --check src/db.mjs && node --check src/ui.mjs && node --check netlify/functions/oidc.mjs && node --check src/wallet.mjs && node --check src/dashboard.mjs && node --check src/passkeys.mjs && node --check public/portal.js && node --check src/email.mjs && node --check src/enrollment.mjs && node --check public/verify-email.js && node --check public/api.js && node --check public/reset-password.js && node --check scripts/check-wallet.mjs && node --check src/supabase-auth.mjs && node --check src/email-auth.mjs",
     "test:integration": "node test/integration.mjs",
     "test": "node --test test/*.test.mjs",
     "check:wallet": "node scripts/check-wallet.mjs"
@@ -16,6 +16,7 @@
   "dependencies": {
     "@simplewebauthn/browser": "14.0.0",
     "@simplewebauthn/server": "14.0.3",
+    "@supabase/supabase-js": "2.118.0",
     "@vercel/functions": "^3.10.2",
     "express": "^5.1.0",
     "helmet": "^8.1.0",

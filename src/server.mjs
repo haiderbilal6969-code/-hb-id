@@ -15,6 +15,8 @@ import { resetPasswordWithToken } from './db.mjs';
 import { passwordReset } from './ui.mjs';
 import {installEmailAccountRoutes} from './enrollment.mjs';
 import {emailSettings} from './email.mjs';
+import {supabaseSettings} from './supabase-auth.mjs';
+import {installSupabaseAuthRoutes} from './email-auth.mjs';
 
 const ISSUER=(process.env.ISSUER||process.env.URL||'').trim().replace(/\/$/,'');
 if (!ISSUER) throw new Error('Set ISSUER to your exact public HTTPS URL');
@@ -72,6 +74,8 @@ app.use(['/portal','/interaction'],express.json({limit:'64kb'}));
 app.use(express.static(new URL('../public/',import.meta.url).pathname,{fallthrough:true,maxAge:'1h'}));
 const secureCookie=issuerUrl.protocol==='https:';
 function html(res,contents,status=200){res.status(status).type('html').send(contents);}
+const loginPage=(error='')=>portalLogin(error,{emailCode:supabaseSettings().ready});
+const interactionPage=options=>interactionLogin({...options,emailCode:supabaseSettings().ready});
 function jsonRequest(req){return Boolean(req.is('application/json')||req.get('accept')?.includes('application/json'));}
 function requestError(req,res,title,message,status){
   if(jsonRequest(req))return res.status(status).json({error:message});
@@ -146,9 +150,9 @@ async function renderPortal(req,res,{message='',error='',created=null,view}={}){
   const selected=view||req.path.split('/')[2]||'overview';
   res.set('Cache-Control','no-store');
   html(res,portal({session,apps,users,passkeys,sessions,connections,pass,events,created,issuer:ISSUER,view:selected,
-    mailConfigured:emailSettings().ready,message:message||results[req.query.result]||'',error:error||(req.query.result==='password-incorrect'?'Your current password is incorrect.':'')}));
+    mailConfigured:emailSettings().ready,emailCodeConfigured:supabaseSettings().ready,message:message||results[req.query.result]||'',error:error||(req.query.result==='password-incorrect'?'Your current password is incorrect.':'')}));
 }
-app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady}));
+app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady,authentication:{emailCode:supabaseSettings().ready}}));
 app.get('/readyz', (_req,res)=>res.status(ownerReady?200:503).json({ready:ownerReady}));
 app.get('/', (_req,res)=>html(res,home({issuer:ISSUER})));
 app.get(['/about','/privacy','/security'],(req,res)=>html(res,informationPage(req.path.slice(1))));
@@ -163,9 +167,9 @@ app.use((_req,res,next)=>{
 });
 app.get('/portal/login', async(req,res)=>{
   if(await getDashboardSession(cookies(req).hb_portal))return res.redirect('/portal');
-  html(res,portalLogin());
+  html(res,loginPage());
 });
-installEmailAccountRoutes(app,{issuer:ISSUER,originGuard,rateLimit});
+installEmailAccountRoutes(app,{issuer:ISSUER,originGuard,rateLimit,emailCodeReady:()=>supabaseSettings().ready});
 app.get('/portal/reset-password',(_req,res)=>html(res,passwordReset()));
 app.post('/portal/reset-password',originGuard,rateLimit,async(req,res)=>{
   const password=req.body?.password;
@@ -179,8 +183,8 @@ app.post('/portal/reset-password',originGuard,rateLimit,async(req,res)=>{
 });
 app.post('/portal/login',originGuard,rateLimit,async(req,res)=>{
   const account=await authenticatePassword(req.body.email,req.body.password);
-  if(!account){await recordSecurityEvent(null,'sign_in_failed');return html(res,portalLogin('Invalid email or password.'),401);}
-  if(!await finishPortalLogin(req,res,account.id,{passwordHash:account.password_hash}))return html(res,portalLogin('Please sign in again.'),401);
+  if(!account){await recordSecurityEvent(null,'sign_in_failed');return html(res,loginPage('Invalid email or password.'),401);}
+  if(!await finishPortalLogin(req,res,account.id,{passwordHash:account.password_hash}))return html(res,loginPage('Please sign in again.'),401);
   await clearRateLimit(req);await recordSecurityEvent(account.id,'password_sign_in');
   res.redirect(303,'/portal');
 });
@@ -191,6 +195,7 @@ async function finishPortalLogin(req,res,userId,credential={}){
   setPortalCookie(res,token);return true;
 }
 installPasskeyRoutes(app,{issuerUrl,originGuard,requirePortal,csrfGuard,rateLimit,clearRateLimit,cookies,provider,finishPortalLogin});
+installSupabaseAuthRoutes(app,{issuerUrl,originGuard,requirePortal,csrfGuard,rateLimit,clearRateLimit,cookies,provider,finishPortalLogin,clearPortalCookie});
 app.get('/portal',requirePortal,async(req,res)=>renderPortal(req,res));
 app.get(['/portal/apps','/portal/members'],requirePortal,requireAdmin,async(req,res)=>renderPortal(req,res));
 app.get(['/portal/security','/portal/profile','/portal/connections'],requirePortal,async(req,res)=>renderPortal(req,res));
@@ -268,7 +273,7 @@ app.get('/interaction/:uid',async(req,res)=>{
   const client=await provider.Client.find(details.params.client_id);
   const clientName=client?.clientName||details.params.client_id||'Unknown app';
   res.set('Cache-Control','no-store');
-  if(details.prompt.name==='login')return html(res,interactionLogin({clientName,uid:details.uid,email:details.params.login_hint||''}));
+  if(details.prompt.name==='login')return html(res,interactionPage({clientName,uid:details.uid,email:details.params.login_hint||''}));
   if(details.prompt.name==='consent')return html(res,interactionConsent({clientName,uid:details.uid,scopes:details.params.scope?.split(/\s+/).filter(Boolean)||[]}));
   return html(res,errorPage('Unsupported request','This authorization action is not available.',400),400);
 });
@@ -279,7 +284,7 @@ app.post('/interaction/:uid/login',originGuard,rateLimit,async(req,res)=>{
   if(!user){
     await recordSecurityEvent(null,'sign_in_failed');
     const client=await provider.Client.find(details.params.client_id);
-    return html(res,interactionLogin({clientName:client?.clientName||'the website',uid:details.uid,error:'Invalid email or password.',email:String(req.body.email||'').slice(0,250)}),401);
+    return html(res,interactionPage({clientName:client?.clientName||'the website',uid:details.uid,error:'Invalid email or password.',email:String(req.body.email||'').slice(0,250)}),401);
   }
   await clearRateLimit(req);await recordSecurityEvent(user.id,'password_sign_in');
   await provider.interactionFinished(req,res,{login:{accountId:String(user.id)}},{mergeWithLastSubmission:false});

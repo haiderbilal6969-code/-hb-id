@@ -66,11 +66,11 @@ export async function issueEmailResetToken(userId){
   }catch(error){await client.query('ROLLBACK');throw error;}finally{client.release();}
 }
 
-export function installEmailAccountRoutes(app,{issuer,originGuard,rateLimit}){
+export function installEmailAccountRoutes(app,{issuer,originGuard,rateLimit,emailCodeReady=()=>false}){
   const show=(res,content,status=200)=>res.status(status).type('html').send(content);
   for(const purpose of ['signup','reset']){
     const path=purpose==='signup'?'/portal/signup':'/portal/forgot-password';
-    app.get(path,(_req,res)=>show(res,emailStart({purpose,configured:emailSettings().ready})));
+    app.get(path,(_req,res)=>purpose==='signup'&&emailCodeReady()?res.redirect(303,'/portal/email'):show(res,emailStart({purpose,configured:emailSettings().ready})));
     app.post(path,originGuard,rateLimit,async(req,res)=>{
       if(!emailSettings().ready)return show(res,emailStart({purpose,configured:false}),503);
       const email=typeof req.body.email==='string'?req.body.email.trim().toLowerCase():'';

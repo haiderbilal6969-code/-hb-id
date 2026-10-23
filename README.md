@@ -16,6 +16,7 @@ HB ID is a **self-hosted, independent OIDC identity-provider MVP** designed for 
 - Email-first public signup: the email link is verified before a member account or password is created.
 - SMTP email recovery plus existing owner-issued, single-use password recovery links; successful recovery revokes existing sessions, passkeys, pending registration challenges, and stored OIDC grants/tokens.
 - Server-only Spacemail SMTP integration and PostgreSQL-backed sending limits. See [EMAIL_SETUP.md](EMAIL_SETUP.md).
+- Optional Supabase email-code sign-in for the portal and OIDC website flows, with password-confirmed account linking, browser-bound one-use assertions, member-only signup and recovery revocation. See [SUPABASE_AUTH_SETUP.md](SUPABASE_AUTH_SETUP.md).
 - Users stored in PostgreSQL; passwords hashed and salted with Node.js scrypt.
 - Administrator account bootstrapped once from secure environment variables.
 - Admin-created member accounts, plus verified public signup when SMTP credentials are configured.

@@ -397,6 +397,7 @@ try {
   assert.equal(await enrollment.reserveEmailSend('limit@example.invalid','new-test-ip'),false,'Global cap protects the SMTP quota');
   delete process.env.SMTP_PASSWORD;
   console.log('PASS: email-first verified member signup, atomic/expired tokens, fixed email links, SMTP rendering, persistent quotas, private recovery, session revocation and safe delivery failure');
+  await (await import('./supabase.integration.mjs')).checkSupabaseIntegration({request,follow,app,db,jar,issuer,ownerPassword:newPassword});
   console.log('HB ID integration checks passed.');
 } catch(error) {
   console.error(`HB ID integration failed: ${error.message}`);

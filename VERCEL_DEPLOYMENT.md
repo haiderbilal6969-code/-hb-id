@@ -5,8 +5,10 @@ Neon `hb-id-dev` project, database `hbid`. Do not create replacement projects.
 
 The Vercel project is `hb-id` in `haiderbilal6969-6859s-projects`.
 The reserved production domain and OIDC issuer is `https://hb-id.vercel.app`.
-The project currently retains its Vercel Authentication protection. Source-file
-deployment does not require expanding the Vercel GitHub App's repository access.
+As checked on 28 October 2026, the stable production domain is publicly accessible;
+Vercel Authentication remains enabled for deployment/preview URLs
+(`all_except_custom_domains`). Source-file deployment does not require expanding
+the Vercel GitHub App's repository access.
 Automatic deployments on Git pushes are not configured.
 
 ## Private environment variables
@@ -42,9 +44,9 @@ first-user setup form. No authentication or account data is available in this st
 
 ## Public access and website integration
 
-Vercel Authentication currently protects this project. An approved production
-protection change is required before external websites can use the OIDC issuer.
-Keep preview and deployment-specific URLs protected. Do not change the stable
+The production issuer is already publicly accessible. No further protection
+change is needed to use its discovery endpoint. Keep preview and
+deployment-specific URLs protected. Do not change the stable
 issuer domain after registering websites.
 
 Once the owner is configured and production access is opened, register a website
@@ -68,3 +70,12 @@ replay rejection, and persistence across provider restarts. It requires an
 send a JSON line on stdin containing `databaseUrl` and
 `confirmation: "isolated-test-database"`. Never run this against the live identity
 database. It creates test users and clients and intentionally does not delete data.
+
+## Release and operations checks
+
+Run the CI workflow on Node 22 with its disposable PostgreSQL service before
+releasing. It uses synthetic identities and stubbed email delivery, never live
+credentials or the production database. Run `npm run check:public` after release.
+`/healthz` is process liveness and includes startup readiness; `/readyz` probes
+the current database and owner and returns 503 on failure with no error details.
+See [OPERATIONS.md](OPERATIONS.md) for recovery, monitoring, and remaining gates.

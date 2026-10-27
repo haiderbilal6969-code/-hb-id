@@ -4,7 +4,7 @@ import { randomBytes, randomUUID, generateKeyPairSync, scrypt as scryptCb, timin
 import { promisify } from 'node:util';
 const scrypt = promisify(scryptCb);
 export const pool = process.env.DATABASE_URL
-  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 5, idleTimeoutMillis: 30000 })
+  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 5, idleTimeoutMillis: 30000, connectionTimeoutMillis: 5000 })
   : null;
 if (pool && process.env.VERCEL) attachDatabasePool(pool);
 export const query = (sql, args=[]) => {

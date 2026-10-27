@@ -17,6 +17,8 @@ import {installEmailAccountRoutes} from './enrollment.mjs';
 import {emailSettings} from './email.mjs';
 import {supabaseSettings} from './supabase-auth.mjs';
 import {installSupabaseAuthRoutes} from './email-auth.mjs';
+import {query} from './db.mjs';
+import {checkReadiness} from './readiness.mjs';
 
 const ISSUER=(process.env.ISSUER||process.env.URL||'').trim().replace(/\/$/,'');
 if (!ISSUER) throw new Error('Set ISSUER to your exact public HTTPS URL');
@@ -153,7 +155,11 @@ async function renderPortal(req,res,{message='',error='',created=null,view}={}){
     mailConfigured:emailSettings().ready,emailCodeConfigured:supabaseSettings().ready,message:message||results[req.query.result]||'',error:error||(req.query.result==='password-incorrect'?'Your current password is incorrect.':'')}));
 }
 app.get('/healthz', (_req,res)=>res.status(200).json({ok:true,ready:ownerReady,authentication:{emailCode:supabaseSettings().ready}}));
-app.get('/readyz', (_req,res)=>res.status(ownerReady?200:503).json({ready:ownerReady}));
+app.get('/readyz', async(_req,res)=>{
+  const ready=ownerReady && await checkReadiness({configured:databaseConfigured,query});
+  res.set('Cache-Control','no-store');
+  res.status(ready?200:503).json({ready});
+});
 app.get('/', (_req,res)=>html(res,home({issuer:ISSUER})));
 app.get(['/about','/privacy','/security'],(req,res)=>html(res,informationPage(req.path.slice(1))));
 app.get('/.well-known/security.txt',(_req,res)=>res.type('text/plain').send(`Contact: mailto:haidermalik@devolper.online\nExpires: 2027-04-22T00:00:00Z\nPreferred-Languages: en\nCanonical: ${ISSUER}/.well-known/security.txt\nPolicy: ${ISSUER}/security\n`));

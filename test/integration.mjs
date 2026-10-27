@@ -81,6 +81,16 @@ try {
   delete process.env.BOOTSTRAP_ADMIN_PASSWORD;
   app = (await import('../src/server.mjs?ready')).default;
   assert.equal((await request('/readyz')).status,200);
+  assert.equal((await request('/readyz')).headers.get('cache-control'),'no-store');
+  await db.query('ALTER TABLE users RENAME TO users_readiness_probe');
+  try {
+    const outage = await request('/readyz');
+    assert.equal(outage.status,503);
+    assert.deepEqual(JSON.parse(outage.text),{ready:false});
+  } finally {
+    await db.query('ALTER TABLE users_readiness_probe RENAME TO users');
+  }
+  assert.equal((await request('/readyz')).status,200);
   const discovery = JSON.parse((await request('/.well-known/openid-configuration')).text);
   assert.equal(discovery.issuer,issuer);
   const keysBefore = JSON.parse((await request(discovery.jwks_uri)).text);
